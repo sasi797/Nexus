@@ -21,7 +21,6 @@ pip install -r requirements.txt
 .venv\Scripts\celery -A app.tasks.celery_app worker --loglevel=info -P solo
 .venv\Scripts\celery -A app.tasks.celery_app beat --loglevel=info
 uvicorn main:app --reload --port 8000
-```
 
 ### 4. Or run everything with Docker
 ```bash
