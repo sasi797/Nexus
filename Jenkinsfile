@@ -5,7 +5,7 @@ pipeline {
             steps { checkout scm }
         }
         stage('Inject .env') {
-            steps { sh 'cp /home/ubuntu/.env .env' }
+            steps { sh 'cp /home/jenkins/.env .env' }
         }
         stage('Deploy') {
             steps {
