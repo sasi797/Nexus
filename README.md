@@ -118,3 +118,4 @@ docker-compose up --build
 - **Redis 7** — JWT refresh token storage, round-robin pointer, stats cache
 - **SQLAlchemy 2 async** — ORM with asyncpg driver
 - **JWT** — access token (15 min) + refresh token (7 days, Redis-backed)
+
