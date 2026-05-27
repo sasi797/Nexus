@@ -16,7 +16,7 @@ pipeline {
         }
         stage('Health Check') {
             steps {
-                sh 'sleep 5 && curl -sf http://localhost/docs > /dev/null && echo "API is up"'
+                sh 'sleep 5 && curl -sfkL https://nexus-api.linkworks.in/docs > /dev/null && echo "API is up"'
             }
         }
     }
