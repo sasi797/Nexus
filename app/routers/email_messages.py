@@ -27,6 +27,7 @@ async def _send_via_graph(
     subject: str,
     body_text: str,
     attachments: list[dict],
+    cc_recipients: list[str] | None = None,
 ):
     token = get_graph_token(core_settings)
     msg: dict = {
@@ -34,6 +35,8 @@ async def _send_via_graph(
         "body": {"contentType": "Text", "content": body_text},
         "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
     }
+    if cc_recipients:
+        msg["ccRecipients"] = [{"emailAddress": {"address": r}} for r in cc_recipients]
     if attachments:
         msg["attachments"] = [
             {
@@ -75,6 +78,7 @@ async def reply_to_booking(
     body_text: str = Form(...),
     files: list[UploadFile] = File(default=[]),
     to_emails: str | None = Form(None),
+    cc_emails: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
     _=Depends(get_current_user),
 ):
@@ -115,6 +119,9 @@ async def reply_to_booking(
     if not all_recipients:
         all_recipients.append(booking.sender_email)
 
+    # Parse CC recipients (exclude the mailbox itself)
+    cc_list = [a.strip() for a in cc_emails.split(',') if a.strip() and a.strip() != sender_addr] if cc_emails else []
+
     # Generate a Message-ID for threading future replies
     from pathlib import Path
     from app.storage import s3_key, upload_bytes
@@ -144,6 +151,7 @@ async def reply_to_booking(
         subject=reply_subject,
         body_text=body_text,
         attachments=graph_attachments,
+        cc_recipients=cc_list if cc_list else None,
     )
 
     # Persist outbound message record (message_id stored so customer replies can be threaded)
@@ -154,6 +162,7 @@ async def reply_to_booking(
         direction="outbound",
         from_email=sender_addr,
         to_email=", ".join(all_recipients),
+        cc_emails=", ".join(cc_list) if cc_list else None,
         subject=reply_subject,
         body_text=body_text,
         in_reply_to=original.message_id if original else None,
