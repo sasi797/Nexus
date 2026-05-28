@@ -11,6 +11,7 @@ from app.routers import agents, allocations, attendance, auth, bookings, dashboa
 
 
 async def _email_poll_loop():
+    await asyncio.sleep(15)  # let uvicorn finish binding before first poll
     while True:
         try:
             from app.tasks.tasks import _poll_inbox_async

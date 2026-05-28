@@ -16,7 +16,18 @@ pipeline {
         }
         stage('Health Check') {
             steps {
-                sh 'sleep 5 && curl -sfkL https://nexus-api.linkworks.in/docs > /dev/null && echo "API is up"'
+                sh '''
+                    for i in $(seq 1 12); do
+                        if curl -sfkL https://nexus-api.linkworks.in/docs > /dev/null; then
+                            echo "API is up"
+                            exit 0
+                        fi
+                        echo "Attempt $i/12 failed, retrying in 5s..."
+                        sleep 5
+                    done
+                    echo "Health check failed after 60s"
+                    exit 1
+                '''
             }
         }
     }
