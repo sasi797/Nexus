@@ -84,7 +84,7 @@ def _parse_addresses(header_val: str | None) -> str:
 
 
 def _strip_re_prefix(subject: str) -> str:
-    """Strip all leading 'Re:' / 'RE:' / 'Fwd:' prefixes to get the base subject."""
+    """Strip leading Re:/Fwd: and [EXTERNAL]/[EXT]/[CAUTION] tags to get the base subject."""
     s = subject.strip()
     while True:
         lower = s.lower()
@@ -92,24 +92,45 @@ def _strip_re_prefix(subject: str) -> str:
             s = s[3:].lstrip()
         elif lower.startswith("fwd:"):
             s = s[4:].lstrip()
+        elif lower.startswith("fw:"):
+            s = s[3:].lstrip()
+        elif s.startswith("["):
+            # Strip bracketed tags like [EXTERNAL], [EXT], [CAUTION], [EXTERNAL EMAIL]
+            end = s.find("]")
+            if end != -1:
+                s = s[end + 1:].lstrip()
+            else:
+                break
         else:
             break
     return s
 
 
-async def _find_existing_booking_id(db, in_reply_to: str, references: str, sender_email: str, subject: str) -> str | None:
+async def _find_existing_booking_id(db, in_reply_to: str, references: str, sender_email: str, subject: str, conversation_id: str | None = None) -> str | None:
     """
     Detect whether this email is a reply to an existing booking.
 
     Strategy (in priority order):
-    1. In-Reply-To / References headers → match against email_messages.message_id
-    2. Subject starts with Re: and base subject + sender_email matches an existing booking
+    1. conversationId — same for every message in an Outlook thread (most reliable)
+    2. In-Reply-To / References headers → match against email_messages.message_id
+    3. Subject starts with Re:/Fwd: + sender_email fallback
     """
     from sqlalchemy import select
     from app.models.email_message import EmailMessage
     from app.models.booking import Booking
 
-    # 1. Header-based threading (most reliable)
+    # 1. conversationId-based (catches forwarded threads where In-Reply-To is absent)
+    if conversation_id:
+        result = await db.execute(
+            select(EmailMessage.booking_id)
+            .where(EmailMessage.conversation_id == conversation_id)
+            .limit(1)
+        )
+        booking_id = result.scalar_one_or_none()
+        if booking_id:
+            return booking_id
+
+    # 2. Header-based threading
     for header_val in [in_reply_to, references]:
         if not header_val:
             continue
@@ -126,15 +147,13 @@ async def _find_existing_booking_id(db, in_reply_to: str, references: str, sende
             if booking_id:
                 return booking_id
 
-    # 2. Subject-based fallback
+    # 3. Subject-based fallback — strip Re:/[EXTERNAL]/etc and match by subject only.
+    # Do NOT filter by sender_email: replies can come from any participant in the thread.
     base_subject = _strip_re_prefix(subject)
     if base_subject != subject.strip():
         result = await db.execute(
             select(Booking.id)
-            .where(
-                Booking.subject == base_subject,
-                Booking.sender_email == sender_email,
-            )
+            .where(Booking.subject == base_subject)
             .order_by(Booking.received_at.desc())
             .limit(1)
         )
@@ -175,7 +194,7 @@ def _graph_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
-def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_sender: str, lookback_minutes: int = 60) -> list[dict]:
+def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_sender: str, lookback_minutes: int = 1440) -> list[dict]:
     """Fetch inbox messages received in the last `lookback_minutes`, handling OData pagination.
 
     Uses time-based fetch instead of isRead filter so emails opened in Outlook
@@ -212,27 +231,80 @@ def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_
     return messages
 
 
-def _graph_get_attachments(client: httpx.Client, token: str, mailbox: str, msg_id: str) -> list[dict]:
+def _graph_get_attachments(client: httpx.Client, token: str, mailbox: str, msg_id: str) -> tuple[list[dict], dict[str, str]]:
+    """
+    Returns (regular_attachments, inline_cid_map).
+    regular_attachments: non-inline files for S3 storage.
+    inline_cid_map: contentId → base64 data URI, for replacing cid: src in HTML.
+    """
+    import base64
     url = f"{GRAPH_BASE}/users/{mailbox}/messages/{msg_id}/attachments"
     resp = client.get(url, headers=_graph_headers(token))
     resp.raise_for_status()
-    attachments = []
-    import base64
+    regular: list[dict] = []
+    inline_map: dict[str, str] = {}
     for att in resp.json().get("value", []):
         if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
             continue
         raw = att.get("contentBytes", "")
-        attachments.append({
-            "filename": att.get("name", "attachment"),
-            "content_type": att.get("contentType", "application/octet-stream"),
-            "data": base64.b64decode(raw) if raw else b"",
-        })
-    return attachments
+        content_type = att.get("contentType", "application/octet-stream")
+        content_id = att.get("contentId", "").strip("<>").strip()
+        is_image = content_type.lower().startswith("image/")
+        # Only treat images with a contentId as inline — PDFs and other non-images go to S3
+        if content_id and is_image:
+            if raw:
+                inline_map[content_id] = f"data:{content_type};base64,{raw}"
+        else:
+            regular.append({
+                "filename": att.get("name", "attachment"),
+                "content_type": content_type,
+                "data": base64.b64decode(raw) if raw else b"",
+            })
+    return regular, inline_map
+
+
+def _apply_inline_images(html: str, inline_map: dict[str, str]) -> str:
+    """Replace all cid: references in HTML with base64 data URIs (case-insensitive)."""
+    import re
+    for content_id, data_uri in inline_map.items():
+        pattern = re.compile(re.escape(f"cid:{content_id}"), re.IGNORECASE)
+        before = len(pattern.findall(html))
+        html = pattern.sub(data_uri, html)
+        print(f"[BTS] CID replace '{content_id}': {before} occurrence(s)")
+    return html
 
 
 def _graph_mark_read(client: httpx.Client, token: str, mailbox: str, msg_id: str):
     url = f"{GRAPH_BASE}/users/{mailbox}/messages/{msg_id}"
     client.patch(url, headers=_graph_headers(token), json={"isRead": True})
+
+
+def _graph_get_sent_items(client: httpx.Client, token: str, mailbox: str, lookback_minutes: int = 60) -> list[dict]:
+    from datetime import timedelta
+    select_fields = (
+        "id,subject,from,toRecipients,ccRecipients,body,"
+        "sentDateTime,internetMessageId,conversationId,"
+        "hasAttachments,internetMessageHeaders"
+    )
+    since = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    messages = []
+    url = None
+    while True:
+        if url is None:
+            resp = client.get(
+                f"{GRAPH_BASE}/users/{mailbox}/mailFolders/SentItems/messages",
+                params={"$filter": f"sentDateTime ge {since}", "$select": select_fields, "$top": "50"},
+                headers=_graph_headers(token),
+            )
+        else:
+            resp = client.get(url, headers=_graph_headers(token))
+        resp.raise_for_status()
+        data = resp.json()
+        messages.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+        if not url:
+            break
+    return messages
 
 
 def _parse_graph_addresses(recipients: list[dict]) -> str:
@@ -323,14 +395,17 @@ async def _poll_inbox_async():
             body_text = body_content if body_type == "text" else None
             body_html = body_content if body_type == "html" else None
 
-            # Attachments
-            raw_attachments = []
+            # Attachments (inline images embedded into HTML as data URIs; regular files go to S3)
+            raw_attachments: list[dict] = []
             if msg.get("hasAttachments"):
-                raw_attachments = _graph_get_attachments(client, token, mailbox, graph_msg_id)
+                raw_attachments, inline_map = _graph_get_attachments(client, token, mailbox, graph_msg_id)
+                if inline_map and body_html:
+                    body_html = _apply_inline_images(body_html, inline_map)
 
             # Threading headers
             in_reply_to = _get_internet_header(msg, "In-Reply-To")
             references = _get_internet_header(msg, "References")
+            conversation_id = msg.get("conversationId")
 
             print(f"[BTS] Processing email from: {sender_email} | Subject: {subject}")
 
@@ -356,7 +431,7 @@ async def _poll_inbox_async():
             async with AsyncSessionLocal() as db:
                 try:
                     existing_booking_id = await _find_existing_booking_id(
-                        db, in_reply_to, references, sender_email, subject
+                        db, in_reply_to, references, sender_email, subject, conversation_id
                     )
 
                     if existing_booking_id:
@@ -385,6 +460,7 @@ async def _poll_inbox_async():
                             booking_id=existing_booking_id,
                             message_id=raw_message_id,
                             in_reply_to=in_reply_to or None,
+                            conversation_id=conversation_id,
                             direction="inbound",
                             from_email=sender_email,
                             to_email=to_emails or mailbox,
@@ -434,6 +510,7 @@ async def _poll_inbox_async():
                             id=email_msg_id,
                             booking_id=booking_id,
                             message_id=raw_message_id,
+                            conversation_id=conversation_id,
                             direction="inbound",
                             from_email=sender_email,
                             to_email=to_emails or mailbox,
@@ -530,6 +607,108 @@ async def _poll_inbox_async():
                 except Exception as e:
                     await db.rollback()
                     print(f"[BTS] Error processing email: {e}")
+
+        # ── Sent Items: capture outbound replies into existing bookings ──
+        try:
+            sent_messages = _graph_get_sent_items(client, token, mailbox, lookback_minutes=1440)
+            print(f"[BTS] Sent items (last 24 hr): {len(sent_messages)}")
+        except Exception as e:
+            print(f"[BTS] Could not fetch sent items: {e}")
+            sent_messages = []
+
+        for msg in sent_messages:
+            graph_msg_id = msg["id"]
+
+            sent_str = msg.get("sentDateTime", "")
+            try:
+                sent_at = datetime.fromisoformat(sent_str.replace("Z", "+00:00")) if sent_str else datetime.now(timezone.utc)
+            except ValueError:
+                sent_at = datetime.now(timezone.utc)
+
+            if cutoff_dt and sent_at < cutoff_dt:
+                continue
+
+            raw_message_id = msg.get("internetMessageId")
+            in_reply_to = _get_internet_header(msg, "In-Reply-To")
+            references = _get_internet_header(msg, "References")
+            conversation_id = msg.get("conversationId")
+
+            # Only process if we have some way to match to a booking
+            if not in_reply_to and not references and not conversation_id:
+                continue
+
+            # Dedup via ProcessedEmail
+            if raw_message_id:
+                async with AsyncSessionLocal() as check_db:
+                    from sqlalchemy import select as sa_select
+                    from app.models.processed_email import ProcessedEmail
+                    exists = await check_db.scalar(
+                        sa_select(ProcessedEmail.message_id)
+                        .where(ProcessedEmail.message_id == raw_message_id)
+                        .limit(1)
+                    )
+                    if exists:
+                        continue
+                    check_db.add(ProcessedEmail(message_id=raw_message_id))
+                    await check_db.commit()
+
+            subject = msg.get("subject") or "(No Subject)"
+            sender_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
+            to_emails = _parse_graph_addresses(msg.get("toRecipients") or [])
+            cc_emails = _parse_graph_addresses(msg.get("ccRecipients") or []) or None
+
+            body_obj = msg.get("body") or {}
+            body_type = body_obj.get("contentType", "text")
+            body_content = body_obj.get("content", "")
+            body_text = body_content if body_type == "text" else None
+            body_html = body_content if body_type == "html" else None
+
+            # Fetch attachments before creating the EmailMessage so inline images
+            # can be embedded into body_html before the record is persisted
+            raw_attachments: list[dict] = []
+            if msg.get("hasAttachments"):
+                raw_attachments, inline_map = _graph_get_attachments(client, token, mailbox, graph_msg_id)
+                if inline_map and body_html:
+                    body_html = _apply_inline_images(body_html, inline_map)
+
+            email_msg_id = uuid.uuid4()
+
+            async with AsyncSessionLocal() as db:
+                try:
+                    existing_booking_id = await _find_existing_booking_id(
+                        db, in_reply_to, references, sender_email, subject, conversation_id
+                    )
+                    if not existing_booking_id:
+                        continue
+
+                    email_record = EmailMessage(
+                        id=email_msg_id,
+                        booking_id=existing_booking_id,
+                        message_id=raw_message_id,
+                        in_reply_to=in_reply_to or None,
+                        conversation_id=conversation_id,
+                        direction="outbound",
+                        from_email=sender_email,
+                        to_email=to_emails,
+                        cc_emails=cc_emails,
+                        subject=subject,
+                        body_text=body_text,
+                        body_html=body_html,
+                        sent_at=sent_at,
+                    )
+                    db.add(email_record)
+                    await db.flush()
+
+                    await _save_attachments(db, raw_attachments, existing_booking_id, email_msg_id)
+
+                    await db.commit()
+                    print(f"[BTS] Outbound reply saved → booking {existing_booking_id} | {subject}")
+                    import json as _json
+                    await redis.publish("bts:events", _json.dumps({"type": "new_message", "booking_id": existing_booking_id, "reopened": False}))
+
+                except Exception as e:
+                    await db.rollback()
+                    print(f"[BTS] Error processing sent item: {e}")
 
     await redis.aclose()
     await engine.dispose()

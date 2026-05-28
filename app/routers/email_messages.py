@@ -4,7 +4,6 @@ import email.utils as email_utils
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -65,7 +64,7 @@ async def list_messages(
         select(EmailMessage)
         .where(EmailMessage.booking_id == booking_id)
         .options(selectinload(EmailMessage.attachments))
-        .order_by(EmailMessage.sent_at.asc())
+        .order_by(EmailMessage.sent_at.desc())
     )
     return result.scalars().all()
 
@@ -192,4 +191,4 @@ async def download_attachment(
         raise HTTPException(404, "Attachment not found")
     from app.storage import presigned_url
     url = await presigned_url(att.storage_path)
-    return RedirectResponse(url)
+    return {"url": url, "filename": att.filename}

@@ -15,6 +15,7 @@ class EmailMessage(Base):
     booking_id: Mapped[str] = mapped_column(String(25), ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
     message_id: Mapped[str | None] = mapped_column(String(998))       # RFC 2822 Message-ID header
     in_reply_to: Mapped[str | None] = mapped_column(String(998))      # RFC 2822 In-Reply-To header
+    conversation_id: Mapped[str | None] = mapped_column(String(200))  # Outlook conversationId
     direction: Mapped[str] = mapped_column(String(10), nullable=False) # 'inbound' | 'outbound'
     from_email: Mapped[str] = mapped_column(String(150), nullable=False)
     to_email: Mapped[str] = mapped_column(Text, nullable=False)       # comma-separated
