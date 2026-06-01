@@ -10,6 +10,7 @@ pipeline {
         stage('Deploy') {
             steps {
                 sh 'docker compose down || true'
+                sh '[ -d nginx.conf ] && rm -rf nginx.conf && git checkout nginx.conf || true'
                 sh 'docker compose build'
                 sh 'docker compose up -d'
             }
