@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.core.config import settings as core_settings
 from app.redis_client import close_redis, get_redis
-from app.routers import agents, allocations, attendance, auth, bookings, dashboard, email_messages, events, notifications, pending_queue, reports, roles, shifts
+from app.routers import agents, allocations, attendance, auth, bookings, dashboard, email_messages, email_templates, events, notifications, pending_queue, reports, roles, shifts
 
 
 async def _email_poll_loop():
@@ -52,6 +52,7 @@ app.include_router(attendance.router)
 app.include_router(allocations.router)
 app.include_router(pending_queue.router)
 app.include_router(roles.router)
+app.include_router(email_templates.router)
 app.include_router(shifts.router)
 app.include_router(reports.router)
 app.include_router(dashboard.router)
