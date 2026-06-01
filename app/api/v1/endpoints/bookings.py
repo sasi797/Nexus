@@ -19,6 +19,7 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 async def list_bookings(
     status: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
+    sender_email: Optional[str] = Query(None),
     mine_only: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -28,7 +29,7 @@ async def list_bookings(
     agent_id = current_agent.id if mine_only else None
     bookings, total = await booking_service.get_bookings(
         db, agent_id=agent_id, status=status, priority=priority,
-        page=page, page_size=page_size
+        sender_email=sender_email, page=page, page_size=page_size
     )
     import math
     return PaginatedResponse(

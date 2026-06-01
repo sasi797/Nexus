@@ -486,7 +486,7 @@ async def _poll_inbox_async():
                         else:
                             priority = "Not Urgent"
 
-                        booking_id = f"BKG-{date.today().year}-{randint(10000, 99999):05d}"
+                        booking_id = f"LW{randint(0, 9999999):07d}"
 
                         booking = Booking(
                             id=booking_id,

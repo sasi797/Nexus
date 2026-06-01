@@ -42,7 +42,7 @@ async def generate_booking_id(db: AsyncSession) -> tuple[str, int, int]:
     seq_row.last_sequence += 1
     await db.flush()
 
-    booking_id = f"BKG-{year}-{seq_row.last_sequence:05d}"
+    booking_id = f"LW{seq_row.last_sequence:07d}"
     return booking_id, year, seq_row.last_sequence
 
 
@@ -158,6 +158,7 @@ async def get_bookings(
     agent_id: Optional[UUID] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
+    sender_email: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[List[Booking], int]:
@@ -171,6 +172,8 @@ async def get_bookings(
         q = q.where(Booking.status == status)
     if priority:
         q = q.where(Booking.priority == priority)
+    if sender_email:
+        q = q.where(Booking.sender_email == sender_email)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar_one()

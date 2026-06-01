@@ -23,11 +23,9 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
 def _generate_id() -> str:
-    from datetime import date
     import random
-    year = date.today().year
-    num = random.randint(10000, 99999)
-    return f"BKG-{year}-{num:05d}"
+    num = random.randint(0, 9999999)
+    return f"LW{num:07d}"
 
 
 async def _send_notifications(db: AsyncSession, coros) -> None:
@@ -44,6 +42,7 @@ async def _send_notifications(db: AsyncSession, coros) -> None:
 async def list_bookings(
     status: str | None = Query(None),
     priority: str | None = Query(None),
+    sender_email: str | None = Query(None),
     agent_id: str | None = Query(None),
     created_after: str | None = Query(None),  # today | 7d | 30d
     closed_after: str | None = Query(None),   # today | week | month
@@ -62,6 +61,8 @@ async def list_bookings(
         q = q.where(Booking.status == status)
     if priority:
         q = q.where(Booking.priority == priority)
+    if sender_email:
+        q = q.where(Booking.sender_email == sender_email)
 
     now = datetime.now(timezone.utc)
     if created_after == 'today':
