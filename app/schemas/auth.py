@@ -21,3 +21,9 @@ class MeResponse(BaseModel):
     name: str
     email: str
     role: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    new_password: str
+    confirm_password: str

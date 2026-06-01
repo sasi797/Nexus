@@ -10,8 +10,8 @@ from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.redis_client import get_redis
-from app.schemas.auth import LoginRequest, MeResponse, RefreshRequest, TokenResponse
-from app.utils.jwt import create_access_token, create_refresh_token, decode_token, verify_password
+from app.schemas.auth import LoginRequest, MeResponse, RefreshRequest, ResetPasswordRequest, TokenResponse
+from app.utils.jwt import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 bearer = HTTPBearer()
@@ -100,3 +100,15 @@ async def me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         role=current_user.role,
     )
+
+
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    if body.new_password != body.confirm_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Passwords do not match")
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No account found with this email")
+    user.password_hash = hash_password(body.new_password)
+    await db.commit()
