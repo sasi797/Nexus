@@ -5,6 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from app.dependencies import get_current_user, get_db
 from app.models.agent import Agent
+from app.models.role import Role
 from app.models.user import User
 from app.schemas.agent import AgentCreate, AgentOut, AgentUpdate
 from app.utils.jwt import hash_password
@@ -19,7 +20,7 @@ async def list_agents(
 ):
     result = await db.execute(
         select(Agent)
-        .options(selectinload(Agent.shift), selectinload(Agent.user))
+        .options(selectinload(Agent.shift), selectinload(Agent.user).selectinload(User.role_obj))
         .where(Agent.is_active == True)
         .order_by(Agent.name)
     )
@@ -40,11 +41,16 @@ async def create_agent(
     if existing_user.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="A user account with this email already exists")
 
+    role_result = await db.execute(select(Role).where(Role.key == body.role))
+    role_obj = role_result.scalar_one_or_none()
+    if role_obj is None:
+        raise HTTPException(status_code=400, detail=f"Role '{body.role}' not found")
+
     user = User(
         name=body.name,
         email=body.email,
         password_hash=hash_password(body.password),
-        role=body.role,
+        role_id=role_obj.id,
     )
     db.add(user)
     await db.flush()
@@ -53,7 +59,7 @@ async def create_agent(
     db.add(agent)
     await db.commit()
     result = await db.execute(
-        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user)).where(Agent.id == agent.id)
+        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user).selectinload(User.role_obj)).where(Agent.id == agent.id)
     )
     return result.scalar_one()
 
@@ -66,7 +72,7 @@ async def get_agent(
 ):
     from uuid import UUID
     result = await db.execute(
-        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user)).where(Agent.id == UUID(agent_id))
+        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user).selectinload(User.role_obj)).where(Agent.id == UUID(agent_id))
     )
     agent = result.scalar_one_or_none()
     if agent is None:
@@ -83,7 +89,7 @@ async def update_agent(
 ):
     from uuid import UUID
     result = await db.execute(
-        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user)).where(Agent.id == UUID(agent_id))
+        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user).selectinload(User.role_obj)).where(Agent.id == UUID(agent_id))
     )
     agent = result.scalar_one_or_none()
     if agent is None:
@@ -94,11 +100,15 @@ async def update_agent(
     for field, value in update_data.items():
         setattr(agent, field, value)
     if role and agent.user:
-        agent.user.role = role
+        role_result = await db.execute(select(Role).where(Role.key == role))
+        role_obj = role_result.scalar_one_or_none()
+        if role_obj is None:
+            raise HTTPException(status_code=400, detail=f"Role '{role}' not found")
+        agent.user.role_id = role_obj.id
 
     await db.commit()
     result = await db.execute(
-        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user)).where(Agent.id == UUID(agent_id))
+        select(Agent).options(selectinload(Agent.shift), selectinload(Agent.user).selectinload(User.role_obj)).where(Agent.id == UUID(agent_id))
     )
     return result.scalar_one()
 
