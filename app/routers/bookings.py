@@ -44,6 +44,7 @@ async def list_bookings(
     priority: str | None = Query(None),
     sender_email: str | None = Query(None),
     agent_id: str | None = Query(None),
+    search: str | None = Query(None),
     created_after: str | None = Query(None),  # today | 7d | 30d
     closed_after: str | None = Query(None),   # today | week | month
     page: int = Query(1, ge=1),
@@ -52,6 +53,7 @@ async def list_bookings(
     current_user: User = Depends(get_current_user),
 ):
     from uuid import UUID
+    from sqlalchemy import or_
     q = select(Booking).options(selectinload(Booking.agent)).order_by(Booking.received_at.desc())
 
     if agent_id:
@@ -63,6 +65,15 @@ async def list_bookings(
         q = q.where(Booking.priority == priority)
     if sender_email:
         q = q.where(Booking.sender_email == sender_email)
+    if search:
+        s = f'%{search}%'
+        q = q.where(or_(
+            Booking.id.ilike(s),
+            Booking.subject.ilike(s),
+            Booking.sender_email.ilike(s),
+            Booking.da_number.ilike(s),
+            Booking.tags.ilike(s),
+        ))
 
     now = datetime.now(timezone.utc)
     if created_after == 'today':
