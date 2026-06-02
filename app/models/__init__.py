@@ -7,9 +7,10 @@ from app.models.allocation import AllocationLog
 from app.models.pending_queue import PendingQueue
 from app.models.email_message import EmailMessage, EmailAttachment
 from app.models.notification import Notification
+from app.models.booking_config import BookingConfig
 
 __all__ = [
     "User", "Shift", "Agent", "Booking", "Attendance",
     "AllocationLog", "PendingQueue", "EmailMessage", "EmailAttachment",
-    "Notification",
+    "Notification", "BookingConfig",
 ]
