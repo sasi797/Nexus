@@ -32,6 +32,7 @@ class Booking(Base):
     sender_email: Mapped[str] = mapped_column(String(150), nullable=False)
     da_number: Mapped[str | None] = mapped_column(String(100))
     da_description: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -23,6 +23,7 @@ class BookingUpdate(BaseModel):
     priority: Priority | None = None
     status: BookingStatus | None = None
     agent_id: UUID | None = None
+    tags: str | None = None
 
 
 class BookingStatusUpdate(BaseModel):
@@ -50,6 +51,7 @@ class BookingOut(BaseModel):
     sender_email: str
     da_number: str | None
     da_description: str | None
+    tags: str | None = None
     received_at: datetime
     assigned_at: datetime | None
     completed_at: datetime | None
@@ -68,6 +70,7 @@ class BookingListOut(BaseModel):
     sender_email: str
     da_number: str | None = None
     da_description: str | None = None
+    tags: str | None = None
     received_at: datetime
     assigned_at: datetime | None
     completed_at: datetime | None = None
