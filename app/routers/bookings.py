@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
@@ -28,12 +29,14 @@ def _generate_id() -> str:
     return f"LW{num:07d}"
 
 
-async def _send_notifications(db: AsyncSession, coros) -> None:
+async def _send_notifications(db: AsyncSession, coros, redis=None) -> None:
     """Run notification inserts after the main commit. Never raises."""
     try:
         for coro in coros:
             await coro
         await db.commit()
+        if redis:
+            await redis.publish("bts:events", json.dumps({"type": "notification"}))
     except Exception:
         await db.rollback()
 
@@ -130,13 +133,14 @@ async def create_booking(
     await db.commit()
     await db.refresh(booking)
     await redis.delete(STATS_CACHE_KEY)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     await _send_notifications(db, [
         notify_roles(db, ['admin', 'supervisor'],
             "New booking received",
             f"Booking {booking_id} — {body.subject}",
             "booking_created", booking_id),
-    ])
+    ], redis=redis)
     return booking
 
 
@@ -218,9 +222,10 @@ async def update_booking(
     await db.commit()
     await db.refresh(booking)
     await redis.delete(STATS_CACHE_KEY)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     if notify_coros:
-        await _send_notifications(db, notify_coros)
+        await _send_notifications(db, notify_coros, redis=redis)
 
     return booking
 
@@ -254,6 +259,7 @@ async def update_status(
     await db.commit()
     await db.refresh(booking)
     await redis.delete(STATS_CACHE_KEY)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     if body.status == "Completed":
         await _send_notifications(db, [
@@ -261,7 +267,7 @@ async def update_status(
                 "Booking completed",
                 f"Booking {booking_id} — {subject} has been marked as completed",
                 "booking_completed", booking_id),
-        ])
+        ], redis=redis)
 
     return booking
 
@@ -271,6 +277,7 @@ async def assign_agent(
     booking_id: str,
     body: dict,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(get_current_user),
 ):
     from uuid import UUID
@@ -309,9 +316,10 @@ async def assign_agent(
 
     await db.commit()
     await db.refresh(booking)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     if notify_coros:
-        await _send_notifications(db, notify_coros)
+        await _send_notifications(db, notify_coros, redis=redis)
 
     return booking
 
@@ -333,6 +341,7 @@ async def add_support_agent(
     booking_id: str,
     body: dict,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(get_current_user),
 ):
     from uuid import UUID
@@ -356,6 +365,7 @@ async def add_support_agent(
     db.add(BookingEvent(booking_id=booking_id, event="support_agent_added", actor_name=current_user.name, new_value=agent.name))
     await db.commit()
     await db.refresh(booking)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
     return booking
 
 
@@ -364,6 +374,7 @@ async def remove_support_agent(
     booking_id: str,
     agent_id: str,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(get_current_user),
 ):
     from uuid import UUID
@@ -383,6 +394,7 @@ async def remove_support_agent(
     db.add(BookingEvent(booking_id=booking_id, event="support_agent_removed", actor_name=current_user.name, old_value=agent.name))
     await db.commit()
     await db.refresh(booking)
+    await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
     return booking
 
 
