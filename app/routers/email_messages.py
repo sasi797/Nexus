@@ -28,6 +28,7 @@ async def _send_via_graph(
     body_text: str,
     attachments: list[dict],
     cc_recipients: list[str] | None = None,
+    message_id: str | None = None,
 ):
     token = get_graph_token(core_settings)
     msg: dict = {
@@ -47,6 +48,9 @@ async def _send_via_graph(
             }
             for att in attachments
         ]
+    # Set the Message-ID so the Sent Items poller can dedup this message
+    if message_id:
+        msg["internetMessageHeaders"] = [{"name": "Message-ID", "value": message_id}]
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{GRAPH_BASE}/users/{sender}/sendMail",
@@ -152,6 +156,7 @@ async def reply_to_booking(
         body_text=body_text,
         attachments=graph_attachments,
         cc_recipients=cc_list if cc_list else None,
+        message_id=outbound_mid,
     )
 
     # Persist outbound message record (message_id stored so customer replies can be threaded)
@@ -179,6 +184,9 @@ async def reply_to_booking(
             storage_path=sf["storage_path"],
         ))
 
+    # Mark this message as processed so the Sent Items poller skips it
+    from app.models.processed_email import ProcessedEmail
+    db.add(ProcessedEmail(message_id=outbound_mid))
     await db.commit()
     await db.refresh(email_msg)
     result2 = await db.execute(

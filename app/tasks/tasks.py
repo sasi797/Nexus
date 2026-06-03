@@ -149,11 +149,19 @@ async def _find_existing_booking_id(db, in_reply_to: str, references: str, sende
 
     # 3. Subject-based fallback — strip Re:/[EXTERNAL]/etc and match by subject only.
     # Do NOT filter by sender_email: replies can come from any participant in the thread.
+    # Also try matching bookings that were stored with a Fw: prefix (forwarded emails).
     base_subject = _strip_re_prefix(subject)
     if base_subject != subject.strip():
+        from sqlalchemy import or_
         result = await db.execute(
             select(Booking.id)
-            .where(Booking.subject == base_subject)
+            .where(
+                or_(
+                    Booking.subject == base_subject,
+                    Booking.subject.ilike(f"fw: {base_subject}"),
+                    Booking.subject.ilike(f"fwd: {base_subject}"),
+                )
+            )
             .order_by(Booking.received_at.desc())
             .limit(1)
         )
