@@ -1,6 +1,7 @@
 import base64
 import uuid
 import email.utils as email_utils
+from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -269,6 +270,183 @@ async def reply_to_booking(
         .options(selectinload(EmailMessage.attachments))
     )
     return result2.scalar_one()
+
+
+@router.post("/bookings/{booking_id}/sync-emails")
+async def sync_booking_emails(
+    booking_id: str,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Fetch the full conversation history from Graph API for a booking and
+    add any emails that are missing from the local database."""
+    from datetime import timezone
+    from app.models.processed_email import ProcessedEmail
+    from app.storage import s3_key, upload_bytes
+
+    booking = await db.get(Booking, booking_id)
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+
+    mailbox = core_settings.MAILBOX_EMAIL
+    if not mailbox:
+        raise HTTPException(503, "MAILBOX_EMAIL not configured")
+
+    # Resolve the Outlook conversationId from any existing message for this booking
+    conv_result = await db.execute(
+        select(EmailMessage.conversation_id)
+        .where(EmailMessage.booking_id == booking_id, EmailMessage.conversation_id.is_not(None))
+        .limit(1)
+    )
+    conversation_id = conv_result.scalar_one_or_none()
+    if not conversation_id:
+        return {"synced": 0}
+
+    token = get_graph_token(core_settings)
+    auth_hdr = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    SELECT = (
+        "id,subject,from,toRecipients,ccRecipients,body,"
+        "receivedDateTime,sentDateTime,internetMessageId,conversationId,"
+        "hasAttachments,internetMessageHeaders"
+    )
+
+    all_msgs: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        url: str | None = None
+        while True:
+            if url is None:
+                resp = await client.get(
+                    f"{GRAPH_BASE}/users/{mailbox}/messages",
+                    params={
+                        "$filter": f"conversationId eq '{conversation_id}'",
+                        "$select": SELECT,
+                        "$top": "50",
+                    },
+                    headers=auth_hdr,
+                )
+            else:
+                resp = await client.get(url, headers=auth_hdr)
+            if resp.status_code != 200:
+                raise HTTPException(502, f"Graph error {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            all_msgs.extend(data.get("value", []))
+            url = data.get("@odata.nextLink")
+            if not url:
+                break
+
+        synced = 0
+        for msg in all_msgs:
+            raw_mid = msg.get("internetMessageId")
+            graph_id = msg["id"]
+
+            # Check email_messages directly (not ProcessedEmail) so emails that
+            # were "lost" by the old dedup bug (marked processed but never saved)
+            # are recovered on sync.
+            if raw_mid:
+                already_saved = await db.scalar(
+                    select(EmailMessage.id)
+                    .where(EmailMessage.message_id == raw_mid)
+                    .limit(1)
+                )
+                if already_saved:
+                    continue
+
+            from_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
+            direction = "outbound" if from_email.lower() == mailbox.lower() else "inbound"
+
+            time_str = msg.get("receivedDateTime") or msg.get("sentDateTime") or ""
+            try:
+                sent_at = datetime.fromisoformat(time_str.replace("Z", "+00:00")) if time_str else datetime.now(timezone.utc)
+            except ValueError:
+                sent_at = datetime.now(timezone.utc)
+
+            def _addrs(lst: list | None) -> str:
+                return ", ".join(
+                    r["emailAddress"]["address"]
+                    for r in (lst or [])
+                    if r.get("emailAddress", {}).get("address")
+                )
+
+            hdrs = msg.get("internetMessageHeaders") or []
+            def _hdr(name: str) -> str:
+                for h in hdrs:
+                    if h.get("name", "").lower() == name.lower():
+                        return h.get("value", "")
+                return ""
+
+            body_obj = msg.get("body") or {}
+            body_type = body_obj.get("contentType", "text").lower()
+            body_content = body_obj.get("content", "")
+
+            email_msg_id = uuid.uuid4()
+            record = EmailMessage(
+                id=email_msg_id,
+                booking_id=booking_id,
+                message_id=raw_mid,
+                in_reply_to=_hdr("In-Reply-To") or None,
+                conversation_id=msg.get("conversationId"),
+                graph_message_id=graph_id,
+                direction=direction,
+                from_email=from_email,
+                to_email=_addrs(msg.get("toRecipients")) or mailbox,
+                cc_emails=_addrs(msg.get("ccRecipients")) or None,
+                subject=msg.get("subject"),
+                body_text=body_content if body_type == "text" else None,
+                body_html=body_content if body_type == "html" else None,
+                sent_at=sent_at,
+            )
+            db.add(record)
+            await db.flush()
+
+            if msg.get("hasAttachments"):
+                att_resp = await client.get(
+                    f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_id}/attachments",
+                    headers=auth_hdr,
+                )
+                if att_resp.status_code == 200:
+                    import re as _re
+                    inline_map: dict[str, str] = {}
+                    for att in att_resp.json().get("value", []):
+                        if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                            continue
+                        raw_bytes = att.get("contentBytes", "")
+                        data_bytes = base64.b64decode(raw_bytes) if raw_bytes else b""
+                        filename = att.get("name", "attachment")
+                        ct = att.get("contentType", "application/octet-stream")
+                        content_id = att.get("contentId", "").strip("<>").strip()
+                        is_image = ct.lower().startswith("image/")
+                        # Inline CID images go into the HTML as data URIs (not S3)
+                        if content_id and is_image and raw_bytes:
+                            inline_map[content_id] = f"data:{ct};base64,{raw_bytes}"
+                        else:
+                            key = s3_key(booking_id, str(email_msg_id), filename)
+                            await upload_bytes(data_bytes, key, ct)
+                            db.add(EmailAttachment(
+                                message_id=email_msg_id,
+                                filename=filename,
+                                content_type=ct,
+                                size_bytes=len(data_bytes),
+                                storage_path=key,
+                            ))
+                    # Replace cid: references in the stored HTML with base64 data URIs
+                    if inline_map and record.body_html:
+                        for cid, data_uri in inline_map.items():
+                            pattern = _re.compile(_re.escape(f"cid:{cid}"), _re.IGNORECASE)
+                            record.body_html = pattern.sub(data_uri, record.body_html)
+
+            if raw_mid:
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                from app.models.processed_email import ProcessedEmail
+                await db.execute(
+                    pg_insert(ProcessedEmail)
+                    .values(message_id=raw_mid)
+                    .on_conflict_do_nothing()
+                )
+
+            synced += 1
+
+    await db.commit()
+    return {"synced": synced}
 
 
 @router.get("/email-attachments/{attachment_id}")
