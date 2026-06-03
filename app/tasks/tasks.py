@@ -640,12 +640,27 @@ async def _poll_inbox_async():
             in_reply_to = _get_internet_header(msg, "In-Reply-To")
             references = _get_internet_header(msg, "References")
             conversation_id = msg.get("conversationId")
+            x_bts_id = _get_internet_header(msg, "X-BTS-Message-ID")
+
+            # Skip messages sent via BTS (reply endpoint stamps X-BTS-Message-ID
+            # and records it in ProcessedEmail to prevent duplicates here)
+            if x_bts_id:
+                async with AsyncSessionLocal() as check_db:
+                    from sqlalchemy import select as sa_select
+                    from app.models.processed_email import ProcessedEmail
+                    exists = await check_db.scalar(
+                        sa_select(ProcessedEmail.message_id)
+                        .where(ProcessedEmail.message_id == x_bts_id)
+                        .limit(1)
+                    )
+                    if exists:
+                        continue
 
             # Only process if we have some way to match to a booking
             if not in_reply_to and not references and not conversation_id:
                 continue
 
-            # Dedup via ProcessedEmail
+            # Dedup via ProcessedEmail (Graph-assigned internetMessageId)
             if raw_message_id:
                 async with AsyncSessionLocal() as check_db:
                     from sqlalchemy import select as sa_select

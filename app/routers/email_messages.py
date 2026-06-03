@@ -48,9 +48,10 @@ async def _send_via_graph(
             }
             for att in attachments
         ]
-    # Set the Message-ID so the Sent Items poller can dedup this message
+    # Set a custom x- header so the Sent Items poller can dedup this message
+    # (Graph API only allows headers starting with 'x-' or 'X-' via sendMail)
     if message_id:
-        msg["internetMessageHeaders"] = [{"name": "Message-ID", "value": message_id}]
+        msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": message_id}]
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{GRAPH_BASE}/users/{sender}/sendMail",
