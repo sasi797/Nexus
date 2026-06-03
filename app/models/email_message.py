@@ -16,6 +16,7 @@ class EmailMessage(Base):
     message_id: Mapped[str | None] = mapped_column(String(998))       # RFC 2822 Message-ID header
     in_reply_to: Mapped[str | None] = mapped_column(String(998))      # RFC 2822 In-Reply-To header
     conversation_id: Mapped[str | None] = mapped_column(String(200))  # Outlook conversationId
+    graph_message_id: Mapped[str | None] = mapped_column(String(500)) # Graph API internal message ID (for reply threading)
     direction: Mapped[str] = mapped_column(String(10), nullable=False) # 'inbound' | 'outbound'
     from_email: Mapped[str] = mapped_column(String(150), nullable=False)
     to_email: Mapped[str] = mapped_column(Text, nullable=False)       # comma-separated

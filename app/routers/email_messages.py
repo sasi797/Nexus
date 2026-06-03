@@ -21,6 +21,49 @@ router = APIRouter(tags=["email-messages"])
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
+async def _reply_via_graph(
+    mailbox: str,
+    graph_message_id: str,
+    recipients: list[str],
+    body_text: str,
+    attachments: list[dict],
+    cc_recipients: list[str] | None = None,
+    bts_message_id: str | None = None,
+):
+    """Send a threaded reply using Graph's /reply endpoint.
+
+    This preserves In-Reply-To and References headers automatically, keeping
+    the email chain intact in the recipient's mail client.
+    """
+    token = get_graph_token(core_settings)
+    msg: dict = {
+        "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
+    }
+    if cc_recipients:
+        msg["ccRecipients"] = [{"emailAddress": {"address": r}} for r in cc_recipients]
+    if attachments:
+        msg["attachments"] = [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": att["filename"],
+                "contentType": att["content_type"],
+                "contentBytes": base64.b64encode(att["data"]).decode(),
+            }
+            for att in attachments
+        ]
+    # Stamp custom header so the Sent Items poller can dedup this message
+    if bts_message_id:
+        msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": bts_message_id}]
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/reply",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"message": msg, "comment": body_text},
+        )
+    if resp.status_code != 202:
+        raise HTTPException(502, f"Graph reply error: {resp.status_code} {resp.text[:300]}")
+
+
 async def _send_via_graph(
     sender: str,
     recipients: list[str],
@@ -30,6 +73,11 @@ async def _send_via_graph(
     cc_recipients: list[str] | None = None,
     message_id: str | None = None,
 ):
+    """Fallback: send a new (non-threaded) email via sendMail.
+
+    Only used when no graph_message_id is available for an inbound message
+    (e.g. bookings created before graph_message_id was introduced).
+    """
     token = get_graph_token(core_settings)
     msg: dict = {
         "subject": subject,
@@ -48,8 +96,6 @@ async def _send_via_graph(
             }
             for att in attachments
         ]
-    # Set a custom x- header so the Sent Items poller can dedup this message
-    # (Graph API only allows headers starting with 'x-' or 'X-' via sendMail)
     if message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": message_id}]
     async with httpx.AsyncClient(timeout=30) as client:
@@ -95,14 +141,29 @@ async def reply_to_booking(
     if not sender_addr:
         raise HTTPException(503, "Email sending not configured (MAILBOX_EMAIL not set)")
 
-    # Find the first inbound message for threading headers
+    # Find the most recent inbound message that has a graph_message_id (for proper threading).
+    # Fall back to any inbound message for recipient/subject info.
     result = await db.execute(
         select(EmailMessage)
-        .where(EmailMessage.booking_id == booking_id, EmailMessage.direction == "inbound")
-        .order_by(EmailMessage.sent_at.asc())
+        .where(
+            EmailMessage.booking_id == booking_id,
+            EmailMessage.direction == "inbound",
+            EmailMessage.graph_message_id.is_not(None),
+        )
+        .order_by(EmailMessage.sent_at.desc())
         .limit(1)
     )
-    original = result.scalar_one_or_none()
+    thread_anchor = result.scalar_one_or_none()
+
+    if thread_anchor is None:
+        # Fallback: any inbound message (pre-migration records without graph_message_id)
+        fallback_result = await db.execute(
+            select(EmailMessage)
+            .where(EmailMessage.booking_id == booking_id, EmailMessage.direction == "inbound")
+            .order_by(EmailMessage.sent_at.asc())
+            .limit(1)
+        )
+        thread_anchor = fallback_result.scalar_one_or_none()
 
     reply_subject = booking.subject
     if not reply_subject.lower().startswith("re:"):
@@ -113,8 +174,8 @@ async def reply_to_booking(
         all_recipients = [a.strip() for a in to_emails.split(',') if a.strip() and a.strip() != sender_addr]
     else:
         all_recipients = []
-        if original:
-            for addr_source in [original.from_email, original.to_email, original.cc_emails]:
+        if thread_anchor:
+            for addr_source in [thread_anchor.from_email, thread_anchor.to_email, thread_anchor.cc_emails]:
                 if not addr_source:
                     continue
                 for addr in addr_source.split(','):
@@ -127,7 +188,7 @@ async def reply_to_booking(
     # Parse CC recipients (exclude the mailbox itself)
     cc_list = [a.strip() for a in cc_emails.split(',') if a.strip() and a.strip() != sender_addr] if cc_emails else []
 
-    # Generate a Message-ID for threading future replies
+    # Generate a Message-ID so future inbound replies can be threaded back
     from pathlib import Path
     from app.storage import s3_key, upload_bytes
 
@@ -149,18 +210,30 @@ async def reply_to_booking(
         saved_files.append({"filename": safe_name, "content_type": content_type, "size_bytes": len(data), "storage_path": key})
         graph_attachments.append({"filename": safe_name, "content_type": content_type, "data": data})
 
-    # Send via Microsoft Graph API
-    await _send_via_graph(
-        sender=sender_addr,
-        recipients=all_recipients,
-        subject=reply_subject,
-        body_text=body_text,
-        attachments=graph_attachments,
-        cc_recipients=cc_list if cc_list else None,
-        message_id=outbound_mid,
-    )
+    # Send via Graph reply endpoint if we have a graph_message_id (preserves thread).
+    # Fall back to sendMail for old bookings ingested before graph_message_id was added.
+    if thread_anchor and thread_anchor.graph_message_id:
+        await _reply_via_graph(
+            mailbox=sender_addr,
+            graph_message_id=thread_anchor.graph_message_id,
+            recipients=all_recipients,
+            body_text=body_text,
+            attachments=graph_attachments,
+            cc_recipients=cc_list if cc_list else None,
+            bts_message_id=outbound_mid,
+        )
+    else:
+        await _send_via_graph(
+            sender=sender_addr,
+            recipients=all_recipients,
+            subject=reply_subject,
+            body_text=body_text,
+            attachments=graph_attachments,
+            cc_recipients=cc_list if cc_list else None,
+            message_id=outbound_mid,
+        )
 
-    # Persist outbound message record (message_id stored so customer replies can be threaded)
+    # Persist outbound message record
     email_msg = EmailMessage(
         id=msg_uuid,
         booking_id=booking_id,
@@ -171,7 +244,7 @@ async def reply_to_booking(
         cc_emails=", ".join(cc_list) if cc_list else None,
         subject=reply_subject,
         body_text=body_text,
-        in_reply_to=original.message_id if original else None,
+        in_reply_to=thread_anchor.message_id if thread_anchor else None,
     )
     db.add(email_msg)
     await db.flush()

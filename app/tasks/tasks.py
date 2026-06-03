@@ -469,6 +469,7 @@ async def _poll_inbox_async():
                             message_id=raw_message_id,
                             in_reply_to=in_reply_to or None,
                             conversation_id=conversation_id,
+                            graph_message_id=graph_msg_id,
                             direction="inbound",
                             from_email=sender_email,
                             to_email=to_emails or mailbox,
@@ -519,6 +520,7 @@ async def _poll_inbox_async():
                             booking_id=booking_id,
                             message_id=raw_message_id,
                             conversation_id=conversation_id,
+                            graph_message_id=graph_msg_id,
                             direction="inbound",
                             from_email=sender_email,
                             to_email=to_emails or mailbox,
@@ -660,7 +662,9 @@ async def _poll_inbox_async():
             if not in_reply_to and not references and not conversation_id:
                 continue
 
-            # Dedup via ProcessedEmail (Graph-assigned internetMessageId)
+            # Dedup check (read-only) — actual ProcessedEmail insert happens inside
+            # the main transaction below so we don't permanently lose emails that
+            # fail booking-matching on first attempt.
             if raw_message_id:
                 async with AsyncSessionLocal() as check_db:
                     from sqlalchemy import select as sa_select
@@ -672,8 +676,6 @@ async def _poll_inbox_async():
                     )
                     if exists:
                         continue
-                    check_db.add(ProcessedEmail(message_id=raw_message_id))
-                    await check_db.commit()
 
             subject = msg.get("subject") or "(No Subject)"
             sender_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
@@ -702,6 +704,7 @@ async def _poll_inbox_async():
                         db, in_reply_to, references, sender_email, subject, conversation_id
                     )
                     if not existing_booking_id:
+                        print(f"[BTS] Sent item skipped — no booking match | subject: {subject}")
                         continue
 
                     email_record = EmailMessage(
@@ -723,6 +726,12 @@ async def _poll_inbox_async():
                     await db.flush()
 
                     await _save_attachments(db, raw_attachments, existing_booking_id, email_msg_id)
+
+                    # Mark as processed in the same transaction so the email is never
+                    # permanently lost if booking match succeeds but commit fails.
+                    if raw_message_id:
+                        from app.models.processed_email import ProcessedEmail
+                        db.add(ProcessedEmail(message_id=raw_message_id))
 
                     await db.commit()
                     print(f"[BTS] Outbound reply saved → booking {existing_booking_id} | {subject}")
