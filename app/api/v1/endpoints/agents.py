@@ -9,7 +9,6 @@ from app.schemas.schemas import AgentCreate, AgentUpdate, AgentOut, RosterReorde
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
-
 @router.get("", response_model=list[AgentOut])
 async def list_agents(
     shift_id: str = None,
