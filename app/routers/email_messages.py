@@ -28,6 +28,20 @@ def _to_html(text: str) -> str:
     return _html.escape(text).replace("\n", "<br>").replace("\r", "")
 
 
+def _wrap_html(fragment: str) -> str:
+    """Wrap a raw contentEditable innerHTML fragment in a minimal email-safe HTML document.
+
+    Raw browser innerHTML uses <div>/<b>/<i>/<u> tags but lacks a font declaration.
+    Wrapping ensures Outlook and other clients render the correct font and honour
+    inline formatting tags rather than stripping them.
+    """
+    return (
+        '<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#000;">'
+        f"{fragment}"
+        "</body></html>"
+    )
+
+
 async def _reply_via_graph(
     mailbox: str,
     graph_message_id: str,
@@ -59,7 +73,7 @@ async def _reply_via_graph(
             }
             for att in attachments
         ]
-    msg["body"] = {"contentType": "HTML", "content": body_html if body_html else _to_html(body_text)}
+    msg["body"] = {"contentType": "HTML", "content": _wrap_html(body_html) if body_html else _to_html(body_text)}
     # Stamp custom header so the Sent Items poller can dedup this message
     if bts_message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": bts_message_id}]
@@ -91,7 +105,7 @@ async def _send_via_graph(
     token = get_graph_token(core_settings)
     msg: dict = {
         "subject": subject,
-        "body": {"contentType": "HTML", "content": body_html if body_html else _to_html(body_text)},
+        "body": {"contentType": "HTML", "content": _wrap_html(body_html) if body_html else _to_html(body_text)},
         "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
     }
     if cc_recipients:
