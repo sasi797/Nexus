@@ -203,10 +203,14 @@ def _graph_headers(token: str) -> dict:
 
 
 def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_sender: str, lookback_minutes: int = 1440) -> list[dict]:
-    """Fetch inbox messages received in the last `lookback_minutes`, handling OData pagination.
+    """Fetch inbound messages received in the last `lookback_minutes` across ALL folders.
 
-    Uses time-based fetch instead of isRead filter so emails opened in Outlook
-    before the poll runs are not missed. ProcessedEmail dedup prevents reprocessing.
+    Queries the top-level /messages endpoint (not just Inbox) so emails that
+    Outlook auto-moved to Deleted Items (e.g. "Ignored" conversations), Clutter,
+    or other folders are still picked up. Filters to inbound-only by excluding
+    messages sent from the mailbox itself — outbound messages are handled separately
+    by the Sent Items poller.
+    ProcessedEmail dedup prevents reprocessing.
     """
     from datetime import timedelta
     select_fields = (
@@ -215,6 +219,8 @@ def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_
         "categories,hasAttachments,internetMessageHeaders"
     )
     since = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Note: Graph does not support `ne` on nested complex-type properties.
+    # Outbound messages are filtered out in the processing loop via a Python check.
     filter_clause = f"receivedDateTime ge {since}"
     if allowed_sender:
         filter_clause += f" and from/emailAddress/address eq '{allowed_sender}'"
@@ -224,7 +230,7 @@ def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_
     while True:
         if url is None:
             resp = client.get(
-                f"{GRAPH_BASE}/users/{mailbox}/mailFolders/Inbox/messages",
+                f"{GRAPH_BASE}/users/{mailbox}/messages",
                 params={"$filter": filter_clause, "$select": select_fields, "$top": "50"},
                 headers=_graph_headers(token),
             )
@@ -365,8 +371,15 @@ async def _poll_inbox_async():
             print(f"[BTS] Invalid PROCESS_EMAILS_SINCE format, ignoring: {settings.PROCESS_EMAILS_SINCE}")
 
     with httpx.Client(timeout=30) as client:
-        messages = _graph_get_messages(client, token, mailbox, settings.ALLOWED_SENDER)
-        print(f"[BTS] Messages from Graph API (last 60 min): {len(messages)} | sender-filter: '{settings.ALLOWED_SENDER}' | cutoff: {cutoff_dt}")
+        # ── Phase 1: Inbound messages ─────────────────────────────────────────
+        # Wrapped in try/except so a Graph API error here never prevents the
+        # Sent Items poller (Phase 2) from running.
+        try:
+            messages = _graph_get_messages(client, token, mailbox, settings.ALLOWED_SENDER)
+            print(f"[BTS] Messages from Graph API (last 24h): {len(messages)} | sender-filter: '{settings.ALLOWED_SENDER}' | cutoff: {cutoff_dt}")
+        except Exception as e:
+            print(f"[BTS] Inbox fetch error — skipping inbound phase: {e}")
+            messages = []
 
         for msg in messages:
             graph_msg_id = msg["id"]
@@ -385,6 +398,11 @@ async def _poll_inbox_async():
 
             subject = msg.get("subject") or "(No Subject)"
             sender_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
+
+            # Skip outbound messages — Graph's /messages endpoint returns all folders
+            # including Sent Items. Outbound messages are handled by Phase 2 below.
+            if sender_email.lower() == mailbox.lower():
+                continue
             raw_message_id = msg.get("internetMessageId")
             to_emails = _parse_graph_addresses(msg.get("toRecipients") or [])
             cc_emails = _parse_graph_addresses(msg.get("ccRecipients") or []) or None
@@ -644,6 +662,8 @@ async def _poll_inbox_async():
             conversation_id = msg.get("conversationId")
             x_bts_id = _get_internet_header(msg, "X-BTS-Message-ID")
 
+            print(f"[BTS] Sent item found: subject='{msg.get('subject', '')[:50]}' | conv_id={'yes' if conversation_id else 'NO'} | in_reply_to={'yes' if in_reply_to else 'NO'} | x_bts={'yes' if x_bts_id else 'NO'}")
+
             # Skip messages sent via BTS (reply endpoint stamps X-BTS-Message-ID
             # and records it in ProcessedEmail to prevent duplicates here)
             if x_bts_id:
@@ -656,10 +676,12 @@ async def _poll_inbox_async():
                         .limit(1)
                     )
                     if exists:
+                        print(f"[BTS] Sent item skipped — BTS reply already recorded")
                         continue
 
             # Only process if we have some way to match to a booking
             if not in_reply_to and not references and not conversation_id:
+                print(f"[BTS] Sent item skipped — no threading info at all")
                 continue
 
             # Dedup check (read-only) — actual ProcessedEmail insert happens inside
@@ -704,7 +726,7 @@ async def _poll_inbox_async():
                         db, in_reply_to, references, sender_email, subject, conversation_id
                     )
                     if not existing_booking_id:
-                        print(f"[BTS] Sent item skipped — no booking match | subject: {subject}")
+                        print(f"[BTS] Sent item skipped — no booking match | subject: {subject} | conv_id: {conversation_id} | in_reply_to: {in_reply_to[:60] if in_reply_to else None}")
                         continue
 
                     email_record = EmailMessage(

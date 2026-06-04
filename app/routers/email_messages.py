@@ -1,4 +1,5 @@
 import base64
+import html as _html
 import uuid
 import email.utils as email_utils
 from datetime import datetime
@@ -20,6 +21,11 @@ from app.tasks.oauth2 import get_graph_token
 router = APIRouter(tags=["email-messages"])
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+def _to_html(text: str) -> str:
+    """Convert plain text (with \n line breaks) to minimal HTML for email clients."""
+    return _html.escape(text).replace("\n", "<br>").replace("\r", "")
 
 
 async def _reply_via_graph(
@@ -52,6 +58,7 @@ async def _reply_via_graph(
             }
             for att in attachments
         ]
+    msg["body"] = {"contentType": "HTML", "content": _to_html(body_text)}
     # Stamp custom header so the Sent Items poller can dedup this message
     if bts_message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": bts_message_id}]
@@ -59,7 +66,7 @@ async def _reply_via_graph(
         resp = await client.post(
             f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/reply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"message": msg, "comment": body_text},
+            json={"message": msg},
         )
     if resp.status_code != 202:
         raise HTTPException(502, f"Graph reply error: {resp.status_code} {resp.text[:300]}")
@@ -82,7 +89,7 @@ async def _send_via_graph(
     token = get_graph_token(core_settings)
     msg: dict = {
         "subject": subject,
-        "body": {"contentType": "Text", "content": body_text},
+        "body": {"contentType": "HTML", "content": _to_html(body_text)},
         "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
     }
     if cc_recipients:
@@ -239,6 +246,7 @@ async def reply_to_booking(
         id=msg_uuid,
         booking_id=booking_id,
         message_id=outbound_mid,
+        conversation_id=thread_anchor.conversation_id if thread_anchor else None,
         direction="outbound",
         from_email=sender_addr,
         to_email=", ".join(all_recipients),
@@ -357,9 +365,17 @@ async def sync_booking_emails(
             raw_mid = msg.get("internetMessageId")
             graph_id = msg["id"]
 
-            # Check email_messages directly (not ProcessedEmail) so emails that
-            # were "lost" by the old dedup bug (marked processed but never saved)
-            # are recovered on sync.
+            hdrs = msg.get("internetMessageHeaders") or []
+            def _hdr(name: str) -> str:
+                for h in hdrs:
+                    if h.get("name", "").lower() == name.lower():
+                        return h.get("value", "")
+                return ""
+
+            # Skip messages already saved — check both the real internetMessageId
+            # and the BTS-internal ID stamped on app-sent replies (X-BTS-Message-ID).
+            # This prevents duplicating BTS replies whose Graph ID differs from the
+            # stored fake outbound_mid.
             if raw_mid:
                 already_saved = await db.scalar(
                     select(EmailMessage.id)
@@ -367,6 +383,16 @@ async def sync_booking_emails(
                     .limit(1)
                 )
                 if already_saved:
+                    continue
+
+            x_bts_id = _hdr("X-BTS-Message-ID")
+            if x_bts_id:
+                bts_already_saved = await db.scalar(
+                    select(EmailMessage.id)
+                    .where(EmailMessage.message_id == x_bts_id)
+                    .limit(1)
+                )
+                if bts_already_saved:
                     continue
 
             from_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
@@ -384,13 +410,6 @@ async def sync_booking_emails(
                     for r in (lst or [])
                     if r.get("emailAddress", {}).get("address")
                 )
-
-            hdrs = msg.get("internetMessageHeaders") or []
-            def _hdr(name: str) -> str:
-                for h in hdrs:
-                    if h.get("name", "").lower() == name.lower():
-                        return h.get("value", "")
-                return ""
 
             body_obj = msg.get("body") or {}
             body_type = body_obj.get("contentType", "text").lower()
