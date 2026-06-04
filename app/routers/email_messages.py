@@ -310,25 +310,43 @@ async def sync_booking_emails(
         "hasAttachments,internetMessageHeaders"
     )
 
+    import asyncio as _asyncio
+
     all_msgs: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as client:
+
+        async def _graph_get(req_url: str | None) -> dict:
+            """One Graph request with a single 429 retry honouring Retry-After."""
+            for attempt in range(2):
+                if req_url is None:
+                    r = await client.get(
+                        f"{GRAPH_BASE}/users/{mailbox}/messages",
+                        params={
+                            "$filter": f"conversationId eq '{conversation_id}'",
+                            "$select": SELECT,
+                            "$top": "50",
+                        },
+                        headers=auth_hdr,
+                    )
+                else:
+                    r = await client.get(req_url, headers=auth_hdr)
+
+                if r.status_code == 429:
+                    wait = int(r.headers.get("Retry-After", "10"))
+                    if attempt == 0:
+                        await _asyncio.sleep(wait)
+                        continue
+                    raise HTTPException(429, "Microsoft Graph is rate-limited — please try again in a few seconds")
+
+                if r.status_code != 200:
+                    raise HTTPException(502, f"Graph error {r.status_code}: {r.text[:200]}")
+
+                return r.json()
+            raise HTTPException(502, "Graph request failed after retry")
+
         url: str | None = None
         while True:
-            if url is None:
-                resp = await client.get(
-                    f"{GRAPH_BASE}/users/{mailbox}/messages",
-                    params={
-                        "$filter": f"conversationId eq '{conversation_id}'",
-                        "$select": SELECT,
-                        "$top": "50",
-                    },
-                    headers=auth_hdr,
-                )
-            else:
-                resp = await client.get(url, headers=auth_hdr)
-            if resp.status_code != 200:
-                raise HTTPException(502, f"Graph error {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
+            data = await _graph_get(url)
             all_msgs.extend(data.get("value", []))
             url = data.get("@odata.nextLink")
             if not url:
