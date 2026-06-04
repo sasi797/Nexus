@@ -36,6 +36,7 @@ async def _reply_via_graph(
     attachments: list[dict],
     cc_recipients: list[str] | None = None,
     bts_message_id: str | None = None,
+    body_html: str | None = None,
 ):
     """Send a threaded reply using Graph's /reply endpoint.
 
@@ -58,7 +59,7 @@ async def _reply_via_graph(
             }
             for att in attachments
         ]
-    msg["body"] = {"contentType": "HTML", "content": _to_html(body_text)}
+    msg["body"] = {"contentType": "HTML", "content": body_html if body_html else _to_html(body_text)}
     # Stamp custom header so the Sent Items poller can dedup this message
     if bts_message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": bts_message_id}]
@@ -80,6 +81,7 @@ async def _send_via_graph(
     attachments: list[dict],
     cc_recipients: list[str] | None = None,
     message_id: str | None = None,
+    body_html: str | None = None,
 ):
     """Fallback: send a new (non-threaded) email via sendMail.
 
@@ -89,7 +91,7 @@ async def _send_via_graph(
     token = get_graph_token(core_settings)
     msg: dict = {
         "subject": subject,
-        "body": {"contentType": "HTML", "content": _to_html(body_text)},
+        "body": {"contentType": "HTML", "content": body_html if body_html else _to_html(body_text)},
         "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
     }
     if cc_recipients:
@@ -135,6 +137,7 @@ async def list_messages(
 async def reply_to_booking(
     booking_id: str,
     body_text: str = Form(...),
+    body_html: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
     to_emails: str | None = Form(None),
     cc_emails: str | None = Form(None),
@@ -229,6 +232,7 @@ async def reply_to_booking(
             attachments=graph_attachments,
             cc_recipients=cc_list if cc_list else None,
             bts_message_id=outbound_mid,
+            body_html=body_html,
         )
     else:
         await _send_via_graph(
@@ -239,6 +243,7 @@ async def reply_to_booking(
             attachments=graph_attachments,
             cc_recipients=cc_list if cc_list else None,
             message_id=outbound_mid,
+            body_html=body_html,
         )
 
     # Persist outbound message record
@@ -253,6 +258,7 @@ async def reply_to_booking(
         cc_emails=", ".join(cc_list) if cc_list else None,
         subject=reply_subject,
         body_text=body_text,
+        body_html=body_html,
         in_reply_to=thread_anchor.message_id if thread_anchor else None,
     )
     db.add(email_msg)
