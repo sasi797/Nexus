@@ -5,7 +5,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr
 
 Priority = Literal["Very Urgent", "Urgent", "Not Urgent"]
-BookingStatus = Literal["Pending", "In Progress", "Completed"]
 
 
 class BookingBase(BaseModel):
@@ -21,13 +20,13 @@ class BookingCreate(BookingBase):
 class BookingUpdate(BaseModel):
     subject: str | None = None
     priority: Priority | None = None
-    status: BookingStatus | None = None
+    status: str | None = None
     agent_id: UUID | None = None
     tags: str | None = None
 
 
 class BookingStatusUpdate(BaseModel):
-    status: BookingStatus
+    status: str
     da_number: str | None = None
     da_description: str | None = None
 

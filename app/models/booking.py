@@ -25,9 +25,7 @@ class Booking(Base):
     priority: Mapped[str] = mapped_column(
         Enum("Very Urgent", "Urgent", "Not Urgent", name="priority_enum"), nullable=False, default="Urgent"
     )
-    status: Mapped[str] = mapped_column(
-        Enum("Pending", "In Progress", "Completed", name="booking_status_enum"), nullable=False, default="Pending"
-    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending")
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
     sender_email: Mapped[str] = mapped_column(String(150), nullable=False)
     da_number: Mapped[str | None] = mapped_column(String(100))
