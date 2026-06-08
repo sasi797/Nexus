@@ -73,6 +73,7 @@ class BookingListOut(BaseModel):
     received_at: datetime
     assigned_at: datetime | None
     completed_at: datetime | None = None
+    updated_at: datetime
 
 
 class BookingPageOut(BaseModel):

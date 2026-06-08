@@ -459,8 +459,11 @@ async def _poll_inbox_async():
                     )
 
                     if existing_booking_id:
+                        from datetime import timezone as _tz
                         booking_obj = await db.get(Booking, existing_booking_id)
                         reopened = False
+                        if booking_obj:
+                            booking_obj.updated_at = datetime.now(_tz.utc)
                         # if booking_obj and booking_obj.status == "Completed":
                         #     booking_obj.status = "In Progress"
                         #     reopened = True
