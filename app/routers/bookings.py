@@ -13,6 +13,7 @@ from app.dependencies import get_current_user, get_db
 from app.models.agent import Agent
 from app.models.allocation import AllocationLog
 from app.models.booking import Booking, BookingEvent, booking_support_agents_table
+from app.models.booking_read import BookingRead
 from app.models.user import User
 from app.redis_client import get_redis
 from app.schemas.booking import BookingCreate, BookingEventOut, BookingListOut, BookingOut, BookingPageOut, BookingStatusUpdate, BookingUpdate
@@ -101,13 +102,59 @@ async def list_bookings(
     result = await db.execute(items_q)
     items = result.scalars().all()
 
+    booking_ids = [b.id for b in items]
+    reads_result = await db.execute(
+        select(BookingRead).where(
+            BookingRead.user_id == current_user.id,
+            BookingRead.booking_id.in_(booking_ids),
+        )
+    )
+    read_map = {r.booking_id: r.read_at for r in reads_result.scalars().all()}
+
+    def _is_read(b: Booking) -> bool:
+        r = read_map.get(b.id)
+        return r is not None and r >= b.updated_at
+
     return BookingPageOut(
-        items=[BookingListOut.model_validate(b) for b in items],
+        items=[BookingListOut.model_validate(b).model_copy(update={"is_read": _is_read(b)}) for b in items],
         total=total,
         page=page,
         page_size=page_size,
         total_pages=math.ceil(total / page_size) if total > 0 else 1,
     )
+
+
+@router.post("/mark-all-read", status_code=204)
+async def mark_all_read(
+    booking_ids: list[str],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = datetime.now(timezone.utc)
+    for bid in booking_ids:
+        await db.execute(
+            pg_insert(BookingRead)
+            .values(user_id=current_user.id, booking_id=bid, read_at=now)
+            .on_conflict_do_update(index_elements=["user_id", "booking_id"], set_={"read_at": now})
+        )
+    await db.commit()
+
+
+@router.post("/{booking_id}/mark-read", status_code=204)
+async def mark_booking_read(
+    booking_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        pg_insert(BookingRead)
+        .values(user_id=current_user.id, booking_id=booking_id, read_at=now)
+        .on_conflict_do_update(index_elements=["user_id", "booking_id"], set_={"read_at": now})
+    )
+    await db.commit()
 
 
 @router.post("", response_model=BookingOut, status_code=status.HTTP_201_CREATED)

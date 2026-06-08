@@ -74,6 +74,7 @@ class BookingListOut(BaseModel):
     assigned_at: datetime | None
     completed_at: datetime | None = None
     updated_at: datetime
+    is_read: bool = True
 
 
 class BookingPageOut(BaseModel):
