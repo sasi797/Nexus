@@ -87,12 +87,12 @@ async def list_bookings(
         q = q.where(Booking.received_at >= now - timedelta(days=30))
 
     if closed_after == 'today':
-        q = q.where(Booking.status == "Completed", Booking.completed_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
+        q = q.where(Booking.completed_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
     elif closed_after == 'week':
         week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        q = q.where(Booking.status == "Completed", Booking.completed_at >= week_start)
+        q = q.where(Booking.completed_at >= week_start)
     elif closed_after == 'month':
-        q = q.where(Booking.status == "Completed", Booking.completed_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+        q = q.where(Booking.completed_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
 
     total_result = await db.execute(select(func.count()).select_from(q.subquery()))
     total = total_result.scalar_one()
@@ -181,7 +181,7 @@ async def update_booking(
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(booking, field, value)
 
-    if body.status == "Completed" and booking.completed_at is None:
+    if body.status in ("Completed", "Ignored") and booking.completed_at is None:
         booking.completed_at = datetime.now(timezone.utc)
     if body.agent_id and booking.assigned_at is None:
         booking.assigned_at = datetime.now(timezone.utc)
@@ -248,8 +248,9 @@ async def update_status(
     subject = booking.subject
     prev_status = booking.status
     booking.status = body.status
-    if body.status == "Completed":
+    if body.status in ("Completed", "Ignored"):
         booking.completed_at = datetime.now(timezone.utc)
+    if body.status == "Completed":
         if body.da_number:
             booking.da_number = body.da_number
         if body.da_description:
