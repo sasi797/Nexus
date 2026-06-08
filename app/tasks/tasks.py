@@ -501,6 +501,17 @@ async def _poll_inbox_async():
                         db.add(email_record)
                         await db.flush()
                         await _save_attachments(db, raw_attachments, existing_booking_id, email_msg_id)
+                        if booking_obj:
+                            from app.utils.notify import notify_roles, notify_user
+                            await notify_roles(db, ['admin', 'supervisor'],
+                                "New email reply",
+                                f"Booking {existing_booking_id} — {booking_obj.subject} received a new reply from {sender_email}",
+                                "email_reply", existing_booking_id)
+                            if booking_obj.agent_id:
+                                await notify_user(db, booking_obj.agent_id,
+                                    "New email reply",
+                                    f"Booking {existing_booking_id} — {booking_obj.subject} received a new reply from {sender_email}",
+                                    "email_reply", existing_booking_id)
                         await db.commit()
                         _graph_mark_read(client, token, mailbox, graph_msg_id)
                         print(f"[BTS] Reply appended to existing booking: {existing_booking_id} | Reopened: {reopened} | Attachments: {len(raw_attachments)}")

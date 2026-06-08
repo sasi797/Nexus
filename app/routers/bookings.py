@@ -311,13 +311,23 @@ async def update_status(
     await redis.delete(STATS_CACHE_KEY)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
+    notify_coros = []
     if body.status == "Completed":
-        await _send_notifications(db, [
-            notify_roles(db, ['admin', 'supervisor'],
-                "Booking completed",
-                f"Booking {booking_id} — {subject} has been marked as completed",
-                "booking_completed", booking_id),
-        ], redis=redis)
+        notify_coros.append(notify_roles(db, ['admin', 'supervisor'],
+            "Booking completed",
+            f"Booking {booking_id} — {subject} has been marked as completed",
+            "booking_completed", booking_id))
+    else:
+        notify_coros.append(notify_roles(db, ['admin', 'supervisor'],
+            "Booking status updated",
+            f"Booking {booking_id} — {subject}: {prev_status} → {body.status}",
+            "status_changed", booking_id))
+    if booking.agent and booking.agent.user_id and booking.agent.user_id != current_user.id:
+        notify_coros.append(notify_user(db, booking.agent.user_id,
+            "Booking status updated",
+            f"Booking {booking_id} — {subject}: {prev_status} → {body.status}",
+            "status_changed", booking_id))
+    await _send_notifications(db, notify_coros, redis=redis)
 
     return booking
 
@@ -416,6 +426,13 @@ async def add_support_agent(
     await db.commit()
     await db.refresh(booking)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
+    if agent.user_id and agent.user_id != current_user.id:
+        await _send_notifications(db, [
+            notify_user(db, agent.user_id,
+                "Added as support agent",
+                f"You have been added as a support agent on Booking {booking_id} — {booking.subject}",
+                "booking_assigned", booking_id),
+        ], redis=redis)
     return booking
 
 
