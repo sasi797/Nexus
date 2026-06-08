@@ -347,14 +347,12 @@ def poll_email_inbox(self):
 async def _poll_inbox_async():
     import redis.asyncio as aioredis
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
     from app.models.booking import Booking
     from app.models.agent import Agent
     from app.models.attendance import Attendance
     from app.models.email_message import EmailMessage
+    from app.database import AsyncSessionLocal
 
-    engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
-    AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     redis = aioredis.from_url(settings.REDIS_URL)
 
     token = get_graph_token(settings)
@@ -765,4 +763,3 @@ async def _poll_inbox_async():
                     print(f"[BTS] Error processing sent item: {e}")
 
     await redis.aclose()
-    await engine.dispose()

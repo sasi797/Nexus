@@ -194,6 +194,8 @@ async def update_booking(
 
     # Collect allocation log + notification context before commit
     notify_coros = []
+    if body.agent_id is None and prev_agent_id is not None and 'agent_id' in body.model_fields_set:
+        db.add(BookingEvent(booking_id=booking_id, event="agent_unassigned", actor_name=current_user.name))
     if body.agent_id is not None:
         from uuid import UUID as _UUID
         new_agent_id = _UUID(str(body.agent_id))
