@@ -1,10 +1,12 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
+from app.models.booking import Booking
+from app.models.booking_read import BookingRead
 from app.models.notification import Notification
 from app.models.user import User
 from app.schemas.notification import NotificationOut, NotificationsListOut
@@ -24,9 +26,30 @@ async def list_notifications(
         .limit(50)
     )
     items = result.scalars().all()
+
+    unread_bookings_result = await db.execute(
+        select(func.count(Booking.id))
+        .select_from(Booking)
+        .outerjoin(
+            BookingRead,
+            and_(
+                BookingRead.booking_id == Booking.id,
+                BookingRead.user_id == current_user.id,
+            ),
+        )
+        .where(
+            or_(
+                BookingRead.booking_id == None,
+                BookingRead.read_at < Booking.updated_at,
+            )
+        )
+    )
+    unread_bookings = unread_bookings_result.scalar_one()
+
     return NotificationsListOut(
         items=[NotificationOut.model_validate(n) for n in items],
         unread_count=sum(1 for n in items if not n.is_read),
+        unread_bookings=unread_bookings,
     )
 
 

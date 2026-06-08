@@ -19,3 +19,4 @@ class NotificationOut(BaseModel):
 class NotificationsListOut(BaseModel):
     items: list[NotificationOut]
     unread_count: int
+    unread_bookings: int = 0
