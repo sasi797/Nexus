@@ -30,10 +30,11 @@ async def get_agent_by_id(db: AsyncSession, agent_id: str) -> Optional[Agent]:
 
 
 async def get_agent_by_email(db: AsyncSession, email: str) -> Optional[Agent]:
+    from sqlalchemy import func
     result = await db.execute(
         select(Agent)
         .options(selectinload(Agent.shift))
-        .where(Agent.email == email)
+        .where(func.lower(Agent.email) == email.lower())
     )
     return result.scalar_one_or_none()
 
