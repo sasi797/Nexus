@@ -355,8 +355,13 @@ async def _poll_inbox_async():
 
     redis = aioredis.from_url(settings.REDIS_URL)
 
-    token = get_graph_token(settings)
-    mailbox = settings.MAILBOX_EMAIL
+    try:
+        token = get_graph_token(settings)
+        mailbox = settings.MAILBOX_EMAIL
+    except Exception as e:
+        print(f"[BTS] Token acquisition failed — skipping poll: {e}")
+        await redis.aclose()
+        return
 
     # Parse cutoff datetime once
     cutoff_dt: datetime | None = None
@@ -406,11 +411,17 @@ async def _poll_inbox_async():
             cc_emails = _parse_graph_addresses(msg.get("ccRecipients") or []) or None
 
             # Outlook categories come as a native list — no parsing needed
+            # Categories matching a known priority set the booking priority.
+            # The first non-priority category is used as the agent name for direct assignment.
+            PRIORITY_CATEGORIES = {"Very Urgent", "Urgent", "Not Urgent"}
             categories: list[str] = msg.get("categories") or []
             category_priority: str | None = None
             category_agent_name: str | None = None
             for cat in categories:
-                category_agent_name = category_agent_name or cat
+                if cat in PRIORITY_CATEGORIES:
+                    category_priority = category_priority or cat
+                else:
+                    category_agent_name = category_agent_name or cat
 
             # Email body
             body_obj = msg.get("body") or {}
@@ -433,7 +444,7 @@ async def _poll_inbox_async():
 
             print(f"[BTS] Processing email from: {sender_email} | Subject: {subject}")
 
-            # Dedup by internetMessageId
+            # Dedup check (read-only — ProcessedEmail insert happens inside the booking transaction)
             if raw_message_id:
                 async with AsyncSessionLocal() as check_db:
                     from sqlalchemy import select as sa_select
@@ -447,8 +458,6 @@ async def _poll_inbox_async():
                         print(f"[BTS] Already processed {raw_message_id[:40]}… — skipping")
                         _graph_mark_read(client, token, mailbox, graph_msg_id)
                         continue
-                    check_db.add(ProcessedEmail(message_id=raw_message_id))
-                    await check_db.commit()
 
             email_msg_id = uuid.uuid4()
 
@@ -460,7 +469,13 @@ async def _poll_inbox_async():
 
                     if existing_booking_id:
                         from datetime import timezone as _tz
-                        booking_obj = await db.get(Booking, existing_booking_id)
+                        from sqlalchemy.orm import selectinload as _sil
+                        bk_res = await db.execute(
+                            select(Booking)
+                            .options(_sil(Booking.agent), _sil(Booking.support_agents))
+                            .where(Booking.id == existing_booking_id)
+                        )
+                        booking_obj = bk_res.scalar_one_or_none()
                         reopened = False
                         if booking_obj:
                             booking_obj.updated_at = datetime.now(_tz.utc)
@@ -503,15 +518,20 @@ async def _poll_inbox_async():
                         await _save_attachments(db, raw_attachments, existing_booking_id, email_msg_id)
                         if booking_obj:
                             from app.utils.notify import notify_roles, notify_user
-                            await notify_roles(db, ['admin', 'supervisor'],
-                                "New email reply",
-                                f"Booking {existing_booking_id} — {booking_obj.subject} received a new reply from {sender_email}",
-                                "email_reply", existing_booking_id)
-                            if booking_obj.agent_id:
-                                await notify_user(db, booking_obj.agent_id,
-                                    "New email reply",
-                                    f"Booking {existing_booking_id} — {booking_obj.subject} received a new reply from {sender_email}",
-                                    "email_reply", existing_booking_id)
+                            reply_title = "New email reply"
+                            reply_body = f"Booking {existing_booking_id} — {booking_obj.subject} received a new reply from {sender_email}"
+                            await notify_roles(db, ['admin', 'supervisor'], reply_title, reply_body, "email_reply", existing_booking_id)
+                            notified_uids = set()
+                            if booking_obj.agent and booking_obj.agent.user_id:
+                                await notify_user(db, booking_obj.agent.user_id, reply_title, reply_body, "email_reply", existing_booking_id)
+                                notified_uids.add(booking_obj.agent.user_id)
+                            for sa in booking_obj.support_agents:
+                                if sa.user_id and sa.user_id not in notified_uids:
+                                    await notify_user(db, sa.user_id, reply_title, reply_body, "email_reply", existing_booking_id)
+                                    notified_uids.add(sa.user_id)
+                        if raw_message_id:
+                            from app.models.processed_email import ProcessedEmail
+                            db.add(ProcessedEmail(message_id=raw_message_id))
                         await db.commit()
                         _graph_mark_read(client, token, mailbox, graph_msg_id)
                         print(f"[BTS] Reply appended to existing booking: {existing_booking_id} | Reopened: {reopened} | Attachments: {len(raw_attachments)}")
@@ -638,11 +658,26 @@ async def _poll_inbox_async():
                                 new_value="Booking stays Open — no present agents",
                             ))
 
+                        from app.utils.notify import notify_roles, notify_user
+                        await notify_roles(db, ['admin', 'supervisor'],
+                            "New booking received",
+                            f"Booking {booking_id} — {subject} from {sender_email}",
+                            "booking_created", booking_id)
+                        if assigned and assigned.user_id:
+                            await notify_user(db, assigned.user_id,
+                                "New booking assigned to you",
+                                f"Booking {booking_id} — {subject} has been assigned to you",
+                                "booking_assigned", booking_id)
+
+                        if raw_message_id:
+                            from app.models.processed_email import ProcessedEmail
+                            db.add(ProcessedEmail(message_id=raw_message_id))
                         await db.commit()
                         _graph_mark_read(client, token, mailbox, graph_msg_id)
                         print(f"[BTS] New booking: {booking_id} | Status: {booking.status} | Priority: {priority} | Attachments: {len(raw_attachments)}")
                         import json as _json
                         await redis.publish("bts:events", _json.dumps({"type": "new_booking", "id": booking_id}))
+                        await redis.publish("bts:events", _json.dumps({"type": "notification"}))
 
                 except Exception as e:
                     await db.rollback()
