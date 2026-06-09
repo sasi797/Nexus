@@ -257,9 +257,17 @@ async def update_booking(
     notify_coros = []
     if body.agent_id is None and prev_agent_id is not None and 'agent_id' in body.model_fields_set:
         db.add(BookingEvent(booking_id=booking_id, event="agent_unassigned", actor_name=current_user.name))
+        if 'status' not in body.model_fields_set and prev_status == "In Progress":
+            booking.status = "Open"
+            db.add(BookingEvent(booking_id=booking_id, event="status_changed", actor_name=current_user.name, old_value=prev_status, new_value="Open"))
     if body.agent_id is not None:
         from uuid import UUID as _UUID
         new_agent_id = _UUID(str(body.agent_id))
+        print(f"[DEBUG assign] booking={booking_id} prev_status={prev_status!r} model_fields_set={body.model_fields_set}")
+        if 'status' not in body.model_fields_set and prev_status == "Open":
+            booking.status = "In Progress"
+            print(f"[DEBUG assign] AUTO status → In Progress")
+            db.add(BookingEvent(booking_id=booking_id, event="status_changed", actor_name=current_user.name, old_value=prev_status, new_value="In Progress"))
         if new_agent_id != prev_agent_id:
             db.add(AllocationLog(
                 booking_id=booking_id,
@@ -370,8 +378,11 @@ async def assign_agent(
     booking.agent_id = UUID(body["agent_id"]) if body.get("agent_id") else None
 
     notify_coros = []
+    prev_status = booking.status
     if booking.agent_id:
-        booking.status = "In Progress"
+        if booking.status == "Open":
+            booking.status = "In Progress"
+            db.add(BookingEvent(booking_id=booking_id, event="status_changed", actor_name=current_user.name, old_value=prev_status, new_value="In Progress"))
         booking.assigned_at = datetime.now(timezone.utc)
         if booking.agent_id != prev_agent_id:
             db.add(AllocationLog(
@@ -393,6 +404,9 @@ async def assign_agent(
                 f"Booking {booking_id} — {subject} assigned to {assigned_agent.name if assigned_agent else 'agent'} by {current_user.name}",
                 "booking_assigned", booking_id))
     else:
+        if booking.status == "In Progress":
+            booking.status = "Open"
+            db.add(BookingEvent(booking_id=booking_id, event="status_changed", actor_name=current_user.name, old_value=prev_status, new_value="Open"))
         db.add(BookingEvent(booking_id=booking_id, event="agent_unassigned", actor_name=current_user.name))
         notify_coros.append(notify_roles(db, ['admin', 'supervisor'],
             "Booking unassigned",
