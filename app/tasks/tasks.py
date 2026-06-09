@@ -543,7 +543,7 @@ async def _poll_inbox_async():
                         if category_priority:
                             priority = category_priority
                         else:
-                            priority = "Not Urgent"
+                            priority = "Blank"
 
                         booking_id = f"LW{randint(0, 9999999):07d}"
 

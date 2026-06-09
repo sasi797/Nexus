@@ -1,15 +1,15 @@
 from datetime import datetime
-from typing import Literal
+from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr
 
-Priority = Literal["Very Urgent", "Urgent", "Not Urgent"]
+Priority = str
 
 
 class BookingBase(BaseModel):
     subject: str
-    priority: Priority = "Urgent"
+    priority: Priority = "Blank"
     sender_email: EmailStr
 
 

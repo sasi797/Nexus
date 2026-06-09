@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Table, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import uuid
@@ -22,9 +22,7 @@ class Booking(Base):
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
-    priority: Mapped[str] = mapped_column(
-        Enum("Very Urgent", "Urgent", "Not Urgent", name="priority_enum"), nullable=False, default="Urgent"
-    )
+    priority: Mapped[str] = mapped_column(String(50), nullable=False, default="Blank")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending")
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
     sender_email: Mapped[str] = mapped_column(String(150), nullable=False)
