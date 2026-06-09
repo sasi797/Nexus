@@ -16,7 +16,13 @@ class NotificationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LatestUnreadBooking(BaseModel):
+    id: str
+    subject: str
+
+
 class NotificationsListOut(BaseModel):
     items: list[NotificationOut]
     unread_count: int
     unread_bookings: int = 0
+    latest_unread_booking: LatestUnreadBooking | None = None

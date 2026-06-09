@@ -9,7 +9,7 @@ from app.models.booking import Booking
 from app.models.booking_read import BookingRead
 from app.models.notification import Notification
 from app.models.user import User
-from app.schemas.notification import NotificationOut, NotificationsListOut
+from app.schemas.notification import LatestUnreadBooking, NotificationOut, NotificationsListOut
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -46,10 +46,36 @@ async def list_notifications(
     )
     unread_bookings = unread_bookings_result.scalar_one()
 
+    latest_unread_booking = None
+    if unread_bookings > 0:
+        latest_res = await db.execute(
+            select(Booking.id, Booking.subject)
+            .select_from(Booking)
+            .outerjoin(
+                BookingRead,
+                and_(
+                    BookingRead.booking_id == Booking.id,
+                    BookingRead.user_id == current_user.id,
+                ),
+            )
+            .where(
+                or_(
+                    BookingRead.booking_id == None,
+                    BookingRead.read_at < Booking.updated_at,
+                )
+            )
+            .order_by(Booking.updated_at.desc())
+            .limit(1)
+        )
+        row = latest_res.first()
+        if row:
+            latest_unread_booking = LatestUnreadBooking(id=row.id, subject=row.subject)
+
     return NotificationsListOut(
         items=[NotificationOut.model_validate(n) for n in items],
         unread_count=sum(1 for n in items if not n.is_read),
         unread_bookings=unread_bookings,
+        latest_unread_booking=latest_unread_booking,
     )
 
 
