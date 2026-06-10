@@ -5,7 +5,6 @@ from datetime import date, datetime, timezone
 from email.header import decode_header
 from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
-from random import randint
 import email as email_lib
 
 import httpx
@@ -546,7 +545,9 @@ async def _poll_inbox_async():
                         else:
                             priority = "Blank"
 
-                        booking_id = f"LW{randint(0, 9999999):07d}"
+                        from sqlalchemy import text as _text
+                        _seq = await db.execute(_text("SELECT nextval('lw_booking_seq')"))
+                        booking_id = f"LW{_seq.scalar():07d}"
 
                         booking = Booking(
                             id=booking_id,
