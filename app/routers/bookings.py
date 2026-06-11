@@ -127,7 +127,7 @@ async def list_bookings(
 
     def _is_read(b: Booking) -> bool:
         r = read_map.get(b.id)
-        return r is not None and r >= b.updated_at
+        return r is not None and r >= b.last_email_at
 
     return BookingPageOut(
         items=[BookingListOut.model_validate(b).model_copy(update={"is_read": _is_read(b)}) for b in items],

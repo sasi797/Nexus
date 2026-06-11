@@ -478,7 +478,9 @@ async def _poll_inbox_async():
                         booking_obj = bk_res.scalar_one_or_none()
                         reopened = False
                         if booking_obj:
-                            booking_obj.updated_at = datetime.now(_tz.utc)
+                            now_utc = datetime.now(_tz.utc)
+                            booking_obj.updated_at = now_utc
+                            booking_obj.last_email_at = now_utc
                         # if booking_obj and booking_obj.status == "Completed":
                         #     booking_obj.status = "In Progress"
                         #     reopened = True

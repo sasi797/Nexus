@@ -34,6 +34,7 @@ class Booking(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    last_email_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     agent: Mapped["Agent"] = relationship("Agent", back_populates="bookings")  # type: ignore[name-defined]
     support_agents: Mapped[list["Agent"]] = relationship("Agent", secondary=booking_support_agents_table, lazy="selectin")  # type: ignore[name-defined]
