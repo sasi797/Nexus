@@ -153,47 +153,45 @@ async def _reply_via_graph(
         return
 
     # Draft path for large attachments.
-    # createReply fails on certain message types (meeting requests, Sent Items, etc.)
-    # so we build a standalone draft and set In-Reply-To manually for threading.
-
-    # 1. Fetch the original message's internetMessageId for In-Reply-To threading.
+    # 1. Try createReply for proper In-Reply-To/References threading.
+    #    Falls back to a standalone draft if the message type doesn't support createReply.
+    draft_id: str | None = None
     async with httpx.AsyncClient(timeout=30) as client:
-        orig_resp = await client.get(
-            f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}?$select=internetMessageId,subject",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-    if orig_resp.status_code == 200:
-        orig_data = orig_resp.json()
-        orig_internet_id = orig_data.get("internetMessageId", "")
-        if orig_internet_id:
-            existing = msg.get("internetMessageHeaders", [])
-            msg["internetMessageHeaders"] = existing + [
-                {"name": "In-Reply-To", "value": orig_internet_id},
-                {"name": "References", "value": orig_internet_id},
-            ]
-        # Derive Re: subject from the original if not already set.
-        if "subject" not in msg:
-            orig_subj = orig_data.get("subject") or ""
-            msg["subject"] = orig_subj if orig_subj.lower().startswith("re:") else f"Re: {orig_subj}"
-
-    # 2. Create a standalone draft with recipients, body, and threading headers.
-    async with httpx.AsyncClient(timeout=30) as client:
-        draft_resp = await client.post(
-            f"{GRAPH_BASE}/users/{mailbox}/messages",
+        cr_resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/createReply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=msg,
+            json={},
         )
-    if draft_resp.status_code != 201:
-        raise HTTPException(502, f"Graph create draft error: {draft_resp.status_code} {draft_resp.text[:300]}")
-    draft_id = draft_resp.json()["id"]
+    if cr_resp.status_code == 201:
+        draft_id = cr_resp.json()["id"]
+        # Patch the draft with recipients, body, and custom header.
+        async with httpx.AsyncClient(timeout=30) as client:
+            patch_resp = await client.patch(
+                f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=msg,
+            )
+        if patch_resp.status_code not in (200, 201):
+            raise HTTPException(502, f"Graph patch draft error: {patch_resp.status_code} {patch_resp.text[:300]}")
+    else:
+        # Fallback: standalone draft (no threading headers — Graph blocks In-Reply-To on new messages).
+        async with httpx.AsyncClient(timeout=30) as client:
+            draft_resp = await client.post(
+                f"{GRAPH_BASE}/users/{mailbox}/messages",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=msg,
+            )
+        if draft_resp.status_code != 201:
+            raise HTTPException(502, f"Graph create draft error: {draft_resp.status_code} {draft_resp.text[:300]}")
+        draft_id = draft_resp.json()["id"]
 
-    # 3. Add small attachments inline, large ones via upload sessions.
+    # 2. Add small attachments inline, large ones via upload sessions.
     for att in small:
         await _attach_small(token, mailbox, draft_id, att)
     for att in large:
         await _upload_large_attachment(token, mailbox, draft_id, att)
 
-    # 4. Send the draft.
+    # 3. Send the draft.
     async with httpx.AsyncClient(timeout=30) as client:
         send_resp = await client.post(
             f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}/send",
