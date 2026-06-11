@@ -155,24 +155,17 @@ async def _reply_via_graph(
     # Draft path for large attachments.
     # 1. Try createReply for proper In-Reply-To/References threading.
     #    Falls back to a standalone draft if the message type doesn't support createReply.
+    # 1. createReply with msg inline — no separate PATCH needed.
+    #    Falls back to standalone draft if the message type doesn't support createReply.
     draft_id: str | None = None
     async with httpx.AsyncClient(timeout=30) as client:
         cr_resp = await client.post(
             f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/createReply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={},
+            json={"message": msg},
         )
     if cr_resp.status_code == 201:
         draft_id = cr_resp.json()["id"]
-        # Patch the draft with recipients, body, and custom header.
-        async with httpx.AsyncClient(timeout=30) as client:
-            patch_resp = await client.patch(
-                f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json=msg,
-            )
-        if patch_resp.status_code not in (200, 201):
-            raise HTTPException(502, f"Graph patch draft error: {patch_resp.status_code} {patch_resp.text[:300]}")
     else:
         # Fallback: standalone draft (no threading headers — Graph blocks In-Reply-To on new messages).
         async with httpx.AsyncClient(timeout=30) as client:
@@ -612,7 +605,7 @@ async def sync_booking_emails(
                         data_bytes = base64.b64decode(raw_bytes) if raw_bytes else b""
                         filename = att.get("name", "attachment")
                         ct = att.get("contentType", "application/octet-stream")
-                        content_id = att.get("contentId", "").strip("<>").strip()
+                        content_id = (att.get("contentId") or "").strip("<>").strip()
                         is_image = ct.lower().startswith("image/")
                         # Inline CID images go into the HTML as data URIs (not S3)
                         if content_id and is_image and raw_bytes:
