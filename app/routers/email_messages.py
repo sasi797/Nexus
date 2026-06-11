@@ -22,6 +22,11 @@ router = APIRouter(tags=["email-messages"])
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
+# Graph inline fileAttachment limit; larger files need an upload session.
+_LARGE_ATTACH_THRESHOLD = 3 * 1024 * 1024  # 3 MB
+# Chunk size must be a multiple of 320 KB per Graph requirements.
+_UPLOAD_CHUNK = 4 * 320 * 1024  # ~1.25 MB
+
 
 def _to_html(text: str) -> str:
     """Convert plain text (with \n line breaks) to minimal HTML for email clients."""
@@ -42,6 +47,67 @@ def _wrap_html(fragment: str) -> str:
     )
 
 
+def _inline_attachment(att: dict) -> dict:
+    return {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": att["filename"],
+        "contentType": att["content_type"],
+        "contentBytes": base64.b64encode(att["data"]).decode(),
+    }
+
+
+async def _attach_small(token: str, mailbox: str, draft_id: str, att: dict) -> None:
+    """POST a single small attachment (≤3 MB) to a draft message."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}/attachments",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=_inline_attachment(att),
+        )
+    if resp.status_code != 201:
+        raise HTTPException(502, f"Graph attach error: {resp.status_code} {resp.text[:200]}")
+
+
+async def _upload_large_attachment(token: str, mailbox: str, draft_id: str, att: dict) -> None:
+    """Upload a file >3 MB to a draft message via Graph upload session (chunked)."""
+    data: bytes = att["data"]
+    total = len(data)
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        session_resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}/attachments/createUploadSession",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"AttachmentItem": {
+                "attachmentType": "file",
+                "name": att["filename"],
+                "size": total,
+                "contentType": att["content_type"],
+            }},
+        )
+    if session_resp.status_code != 201:
+        raise HTTPException(502, f"Graph upload session error: {session_resp.status_code} {session_resp.text[:200]}")
+
+    upload_url = session_resp.json()["uploadUrl"]
+
+    # The upload URL is pre-authenticated; no Authorization header needed for chunks.
+    async with httpx.AsyncClient(timeout=300) as client:
+        offset = 0
+        while offset < total:
+            end = min(offset + _UPLOAD_CHUNK, total)
+            chunk = data[offset:end]
+            put = await client.put(
+                upload_url,
+                headers={
+                    "Content-Range": f"bytes {offset}-{end - 1}/{total}",
+                    "Content-Length": str(len(chunk)),
+                },
+                content=chunk,
+            )
+            if put.status_code not in (200, 201, 202):
+                raise HTTPException(502, f"Graph chunk upload error at byte {offset}: {put.status_code} {put.text[:200]}")
+            offset = end
+
+
 async def _reply_via_graph(
     mailbox: str,
     graph_message_id: str,
@@ -56,35 +122,72 @@ async def _reply_via_graph(
 
     This preserves In-Reply-To and References headers automatically, keeping
     the email chain intact in the recipient's mail client.
+    For attachments >3 MB a draft-based flow is used with upload sessions.
     """
     token = get_graph_token(core_settings)
+
+    small = [a for a in attachments if len(a["data"]) <= _LARGE_ATTACH_THRESHOLD]
+    large = [a for a in attachments if len(a["data"]) > _LARGE_ATTACH_THRESHOLD]
+
     msg: dict = {
         "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
+        "body": {"contentType": "HTML", "content": _wrap_html(body_html) if body_html else _to_html(body_text)},
     }
     if cc_recipients:
         msg["ccRecipients"] = [{"emailAddress": {"address": r}} for r in cc_recipients]
-    if attachments:
-        msg["attachments"] = [
-            {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": att["filename"],
-                "contentType": att["content_type"],
-                "contentBytes": base64.b64encode(att["data"]).decode(),
-            }
-            for att in attachments
-        ]
-    msg["body"] = {"contentType": "HTML", "content": _wrap_html(body_html) if body_html else _to_html(body_text)}
-    # Stamp custom header so the Sent Items poller can dedup this message
     if bts_message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": bts_message_id}]
+
+    if not large:
+        # Fast path: single /reply call with inline attachments.
+        if small:
+            msg["attachments"] = [_inline_attachment(a) for a in small]
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/reply",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"message": msg},
+            )
+        if resp.status_code != 202:
+            raise HTTPException(502, f"Graph reply error: {resp.status_code} {resp.text[:300]}")
+        return
+
+    # Draft path for large attachments.
+    # 1. Create a draft reply (Graph fills In-Reply-To / References automatically).
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/reply",
+        draft_resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/createReply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"message": msg},
+            json={},
         )
-    if resp.status_code != 202:
-        raise HTTPException(502, f"Graph reply error: {resp.status_code} {resp.text[:300]}")
+    if draft_resp.status_code != 201:
+        raise HTTPException(502, f"Graph createReply error: {draft_resp.status_code} {draft_resp.text[:300]}")
+    draft_id = draft_resp.json()["id"]
+
+    # 2. Patch the draft with recipients, body, and custom header.
+    async with httpx.AsyncClient(timeout=30) as client:
+        patch_resp = await client.patch(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=msg,
+        )
+    if patch_resp.status_code not in (200, 201):
+        raise HTTPException(502, f"Graph patch draft error: {patch_resp.status_code} {patch_resp.text[:300]}")
+
+    # 3. Add small attachments inline, large ones via upload sessions.
+    for att in small:
+        await _attach_small(token, mailbox, draft_id, att)
+    for att in large:
+        await _upload_large_attachment(token, mailbox, draft_id, att)
+
+    # 4. Send the draft.
+    async with httpx.AsyncClient(timeout=30) as client:
+        send_resp = await client.post(
+            f"{GRAPH_BASE}/users/{mailbox}/messages/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if send_resp.status_code != 202:
+        raise HTTPException(502, f"Graph send draft error: {send_resp.status_code} {send_resp.text[:300]}")
 
 
 async def _send_via_graph(
@@ -101,8 +204,13 @@ async def _send_via_graph(
 
     Only used when no graph_message_id is available for an inbound message
     (e.g. bookings created before graph_message_id was introduced).
+    For attachments >3 MB a draft-based flow is used with upload sessions.
     """
     token = get_graph_token(core_settings)
+
+    small = [a for a in attachments if len(a["data"]) <= _LARGE_ATTACH_THRESHOLD]
+    large = [a for a in attachments if len(a["data"]) > _LARGE_ATTACH_THRESHOLD]
+
     msg: dict = {
         "subject": subject,
         "body": {"contentType": "HTML", "content": _wrap_html(body_html) if body_html else _to_html(body_text)},
@@ -110,26 +218,49 @@ async def _send_via_graph(
     }
     if cc_recipients:
         msg["ccRecipients"] = [{"emailAddress": {"address": r}} for r in cc_recipients]
-    if attachments:
-        msg["attachments"] = [
-            {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": att["filename"],
-                "contentType": att["content_type"],
-                "contentBytes": base64.b64encode(att["data"]).decode(),
-            }
-            for att in attachments
-        ]
     if message_id:
         msg["internetMessageHeaders"] = [{"name": "X-BTS-Message-ID", "value": message_id}]
+
+    if not large:
+        # Fast path: sendMail with inline attachments.
+        if small:
+            msg["attachments"] = [_inline_attachment(a) for a in small]
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{GRAPH_BASE}/users/{sender}/sendMail",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"message": msg, "saveToSentItems": True},
+            )
+        if resp.status_code != 202:
+            raise HTTPException(502, f"Graph sendMail error: {resp.status_code} {resp.text[:300]}")
+        return
+
+    # Draft path for large attachments.
+    # 1. Create the draft.
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{GRAPH_BASE}/users/{sender}/sendMail",
+        draft_resp = await client.post(
+            f"{GRAPH_BASE}/users/{sender}/messages",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"message": msg, "saveToSentItems": True},
+            json=msg,
         )
-    if resp.status_code != 202:
-        raise HTTPException(502, f"Graph sendMail error: {resp.status_code} {resp.text[:300]}")
+    if draft_resp.status_code != 201:
+        raise HTTPException(502, f"Graph create draft error: {draft_resp.status_code} {draft_resp.text[:300]}")
+    draft_id = draft_resp.json()["id"]
+
+    # 2. Add small attachments inline, large ones via upload sessions.
+    for att in small:
+        await _attach_small(token, sender, draft_id, att)
+    for att in large:
+        await _upload_large_attachment(token, sender, draft_id, att)
+
+    # 3. Send the draft.
+    async with httpx.AsyncClient(timeout=30) as client:
+        send_resp = await client.post(
+            f"{GRAPH_BASE}/users/{sender}/messages/{draft_id}/send",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if send_resp.status_code != 202:
+        raise HTTPException(502, f"Graph send draft error: {send_resp.status_code} {send_resp.text[:300]}")
 
 
 @router.get("/bookings/{booking_id}/messages", response_model=list[EmailMessageOut])
