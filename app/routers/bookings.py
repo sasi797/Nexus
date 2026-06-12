@@ -95,20 +95,44 @@ async def list_bookings(
         ))
 
     now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if created_after == 'today':
-        q = q.where(Booking.received_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
+        q = q.where(Booking.received_at >= today_start)
+    elif created_after == 'yesterday':
+        yesterday_start = today_start - timedelta(days=1)
+        q = q.where(Booking.received_at >= yesterday_start, Booking.received_at < today_start)
+    elif created_after == '2d':
+        two_days_start = today_start - timedelta(days=2)
+        yesterday_start = today_start - timedelta(days=1)
+        q = q.where(Booking.received_at >= two_days_start, Booking.received_at < yesterday_start)
     elif created_after == '7d':
         q = q.where(Booking.received_at >= now - timedelta(days=7))
     elif created_after == '30d':
         q = q.where(Booking.received_at >= now - timedelta(days=30))
+    elif created_after and created_after.startswith('date:'):
+        try:
+            d = datetime.strptime(created_after[5:], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            q = q.where(Booking.received_at >= day_start, Booking.received_at < day_end)
+        except ValueError:
+            pass
 
     if closed_after == 'today':
-        q = q.where(Booking.completed_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
+        q = q.where(Booking.completed_at >= today_start)
     elif closed_after == 'week':
         week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         q = q.where(Booking.completed_at >= week_start)
     elif closed_after == 'month':
         q = q.where(Booking.completed_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+    elif closed_after and closed_after.startswith('date:'):
+        try:
+            d = datetime.strptime(closed_after[5:], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            q = q.where(Booking.completed_at >= day_start, Booking.completed_at < day_end)
+        except ValueError:
+            pass
 
     total_result = await db.execute(select(func.count()).select_from(q.subquery()))
     total = total_result.scalar_one()
