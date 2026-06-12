@@ -262,7 +262,7 @@ def _graph_get_attachments(client: httpx.Client, token: str, mailbox: str, msg_i
             continue
         raw = att.get("contentBytes", "")
         content_type = att.get("contentType", "application/octet-stream")
-        content_id = att.get("contentId", "").strip("<>").strip()
+        content_id = (att.get("contentId") or "").strip("<>").strip()
         is_image = content_type.lower().startswith("image/")
         # Only treat images with a contentId as inline — PDFs and other non-images go to S3
         if content_id and is_image:

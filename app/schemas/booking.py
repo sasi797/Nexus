@@ -75,6 +75,7 @@ class BookingListOut(BaseModel):
     completed_at: datetime | None = None
     updated_at: datetime
     is_read: bool = True
+    has_reply: bool = False
 
 
 class BookingPageOut(BaseModel):

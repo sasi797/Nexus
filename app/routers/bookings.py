@@ -14,6 +14,7 @@ from app.models.agent import Agent
 from app.models.allocation import AllocationLog
 from app.models.booking import Booking, BookingEvent, booking_support_agents_table
 from app.models.booking_read import BookingRead
+from app.models.email_message import EmailMessage
 from app.models.user import User
 from app.redis_client import get_redis
 from app.schemas.booking import BookingCreate, BookingEventOut, BookingListOut, BookingOut, BookingPageOut, BookingStatusUpdate, BookingUpdate
@@ -125,12 +126,22 @@ async def list_bookings(
     )
     read_map = {r.booking_id: r.read_at for r in reads_result.scalars().all()}
 
+    email_counts_result = await db.execute(
+        select(EmailMessage.booking_id, func.count(EmailMessage.id).label("cnt"))
+        .where(EmailMessage.booking_id.in_(booking_ids))
+        .group_by(EmailMessage.booking_id)
+    )
+    email_count_map = {row.booking_id: row.cnt for row in email_counts_result}
+
     def _is_read(b: Booking) -> bool:
         r = read_map.get(b.id)
         return r is not None and r >= b.last_email_at
 
+    def _has_reply(b: Booking) -> bool:
+        return (email_count_map.get(b.id) or 0) > 1
+
     return BookingPageOut(
-        items=[BookingListOut.model_validate(b).model_copy(update={"is_read": _is_read(b)}) for b in items],
+        items=[BookingListOut.model_validate(b).model_copy(update={"is_read": _is_read(b), "has_reply": _has_reply(b)}) for b in items],
         total=total,
         page=page,
         page_size=page_size,
