@@ -3,6 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.formparsers import MultiPartParser
+
+# Raise Starlette's default 1 MB cap on individual form fields to support
+# large body_html payloads (e.g. replies containing pasted images).
+MultiPartParser.max_part_size = 25 * 1024 * 1024  # 25 MB
 
 from app.config import settings
 from app.core.config import settings as core_settings

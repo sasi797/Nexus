@@ -26,6 +26,25 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _LARGE_ATTACH_THRESHOLD = 3 * 1024 * 1024  # 3 MB
 # Chunk size must be a multiple of 320 KB per Graph requirements.
 _UPLOAD_CHUNK = 4 * 320 * 1024  # ~1.25 MB
+# Maximum attachment size we accept from the client.
+_MAX_ATTACH_SIZE = 20 * 1024 * 1024  # 20 MB
+
+
+def _graph_error_msg(resp) -> str:
+    """Return a concise, human-readable message from a Graph API error response."""
+    try:
+        err = resp.json().get("error", {})
+        code = err.get("code", "")
+        message = err.get("message", "")
+        if "SizeExceeded" in code or "MessageSize" in code or resp.status_code == 413:
+            return "File too large for this mailbox. Ask your admin to raise the attachment size limit."
+        if code == "AccessDenied" or resp.status_code == 403:
+            return "Permission denied — the app needs Mail.ReadWrite access in Azure AD."
+        if message:
+            return message[:200]
+    except Exception:
+        pass
+    return f"Graph API error {resp.status_code}: {resp.text[:150]}"
 
 
 def _to_html(text: str) -> str:
@@ -65,7 +84,7 @@ async def _attach_small(token: str, mailbox: str, draft_id: str, att: dict) -> N
             json=_inline_attachment(att),
         )
     if resp.status_code != 201:
-        raise HTTPException(502, f"Graph attach error: {resp.status_code} {resp.text[:200]}")
+        raise HTTPException(502, f"Attach failed: {_graph_error_msg(resp)}")
 
 
 async def _upload_large_attachment(token: str, mailbox: str, draft_id: str, att: dict) -> None:
@@ -85,7 +104,7 @@ async def _upload_large_attachment(token: str, mailbox: str, draft_id: str, att:
             }},
         )
     if session_resp.status_code != 201:
-        raise HTTPException(502, f"Graph upload session error: {session_resp.status_code} {session_resp.text[:200]}")
+        raise HTTPException(502, f"Upload session failed: {_graph_error_msg(session_resp)}")
 
     upload_url = session_resp.json()["uploadUrl"]
 
@@ -104,7 +123,7 @@ async def _upload_large_attachment(token: str, mailbox: str, draft_id: str, att:
                 content=chunk,
             )
             if put.status_code not in (200, 201, 202):
-                raise HTTPException(502, f"Graph chunk upload error at byte {offset}: {put.status_code} {put.text[:200]}")
+                raise HTTPException(502, f"Chunk upload failed at byte {offset}: {_graph_error_msg(put)}")
             offset = end
 
 
@@ -149,7 +168,7 @@ async def _reply_via_graph(
                 json={"message": msg},
             )
         if resp.status_code != 202:
-            raise HTTPException(502, f"Graph reply error: {resp.status_code} {resp.text[:300]}")
+            raise HTTPException(502, f"Send failed: {_graph_error_msg(resp)}")
         return
 
     # Draft path for large attachments.
@@ -175,7 +194,7 @@ async def _reply_via_graph(
                 json=msg,
             )
         if draft_resp.status_code != 201:
-            raise HTTPException(502, f"Graph create draft error: {draft_resp.status_code} {draft_resp.text[:300]}")
+            raise HTTPException(502, f"Create draft failed: {_graph_error_msg(draft_resp)}")
         draft_id = draft_resp.json()["id"]
 
     # 2. Add small attachments inline, large ones via upload sessions.
@@ -191,7 +210,7 @@ async def _reply_via_graph(
             headers={"Authorization": f"Bearer {token}"},
         )
     if send_resp.status_code != 202:
-        raise HTTPException(502, f"Graph send draft error: {send_resp.status_code} {send_resp.text[:300]}")
+        raise HTTPException(502, f"Send draft failed: {_graph_error_msg(send_resp)}")
 
 
 async def _send_via_graph(
@@ -236,7 +255,7 @@ async def _send_via_graph(
                 json={"message": msg, "saveToSentItems": True},
             )
         if resp.status_code != 202:
-            raise HTTPException(502, f"Graph sendMail error: {resp.status_code} {resp.text[:300]}")
+            raise HTTPException(502, f"Send failed: {_graph_error_msg(resp)}")
         return
 
     # Draft path for large attachments.
@@ -248,7 +267,7 @@ async def _send_via_graph(
             json=msg,
         )
     if draft_resp.status_code != 201:
-        raise HTTPException(502, f"Graph create draft error: {draft_resp.status_code} {draft_resp.text[:300]}")
+        raise HTTPException(502, f"Create draft failed: {_graph_error_msg(draft_resp)}")
     draft_id = draft_resp.json()["id"]
 
     # 2. Add small attachments inline, large ones via upload sessions.
@@ -264,7 +283,7 @@ async def _send_via_graph(
             headers={"Authorization": f"Bearer {token}"},
         )
     if send_resp.status_code != 202:
-        raise HTTPException(502, f"Graph send draft error: {send_resp.status_code} {send_resp.text[:300]}")
+        raise HTTPException(502, f"Send draft failed: {_graph_error_msg(send_resp)}")
 
 
 @router.get("/bookings/{booking_id}/messages", response_model=list[EmailMessageOut])
@@ -363,6 +382,8 @@ async def reply_to_booking(
         if not upload.filename:
             continue
         data = await upload.read()
+        if len(data) > _MAX_ATTACH_SIZE:
+            raise HTTPException(413, f"File '{Path(upload.filename).name}' exceeds the 20 MB attachment limit.")
         safe_name = Path(upload.filename).name
         content_type = upload.content_type or "application/octet-stream"
         key = s3_key(booking_id, str(msg_uuid), safe_name)
