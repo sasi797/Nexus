@@ -178,7 +178,7 @@ async def get_bookings(
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar_one()
 
-    q = q.order_by(Booking.received_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    q = q.order_by(Booking.last_email_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(q)
     return result.scalars().all(), total
 

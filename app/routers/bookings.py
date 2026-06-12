@@ -73,7 +73,7 @@ async def list_bookings(
 ):
     from uuid import UUID
     from sqlalchemy import or_
-    q = select(Booking).options(selectinload(Booking.agent)).order_by(Booking.received_at.desc())
+    q = select(Booking).options(selectinload(Booking.agent)).order_by(Booking.last_email_at.desc())
 
     if agent_id:
         q = q.where(Booking.agent_id == UUID(agent_id))
