@@ -26,7 +26,7 @@ class Booking(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending")
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
     sender_email: Mapped[str] = mapped_column(String(150), nullable=False)
-    da_number: Mapped[str | None] = mapped_column(String(100))
+    da_number: Mapped[str | None] = mapped_column(Text)
     da_description: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
