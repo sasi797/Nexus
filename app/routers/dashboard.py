@@ -15,6 +15,16 @@ from app.schemas.reports import DashboardStats
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
+def _da_count_expr():
+    """Sum of individual DA numbers across all matching completed bookings."""
+    return func.coalesce(
+        func.sum(
+            func.array_length(func.string_to_array(Booking.da_number, ','), 1)
+        ),
+        0,
+    )
+
+
 @router.get("/stats", response_model=DashboardStats)
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
@@ -25,24 +35,39 @@ async def dashboard_stats(
         agent_result = await db.execute(select(Agent).where(Agent.user_id == current_user.id))
         agent = agent_result.scalar_one_or_none()
         if agent is None:
-            return DashboardStats(total_bookings=0, pending=0, in_progress=0, completed=0)
+            return DashboardStats(total_bookings=0, pending=0, in_progress=0, completed=0, da_numbers_count=0)
 
         aid = agent.id
-        total      = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid)) or 0
-        pending    = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Pending")) or 0
+        total       = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid)) or 0
+        pending     = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Pending")) or 0
         in_progress = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "In Progress")) or 0
-        completed  = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Completed")) or 0
-        return DashboardStats(total_bookings=total, pending=pending, in_progress=in_progress, completed=completed)
+        completed   = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Completed")) or 0
+        da_count    = await db.scalar(
+            select(_da_count_expr()).where(
+                Booking.agent_id == aid,
+                Booking.status == "Completed",
+                Booking.da_number.isnot(None),
+                Booking.da_number != '',
+            )
+        ) or 0
+        return DashboardStats(total_bookings=total, pending=pending, in_progress=in_progress, completed=completed, da_numbers_count=int(da_count))
 
     cached = await redis.get("bts:dashboard:stats")
     if cached:
         return DashboardStats(**json.loads(cached))
 
-    total      = await db.scalar(select(func.count(Booking.id))) or 0
-    pending    = await db.scalar(select(func.count(Booking.id)).where(Booking.status == "Pending")) or 0
+    total       = await db.scalar(select(func.count(Booking.id))) or 0
+    pending     = await db.scalar(select(func.count(Booking.id)).where(Booking.status == "Pending")) or 0
     in_progress = await db.scalar(select(func.count(Booking.id)).where(Booking.status == "In Progress")) or 0
-    completed  = await db.scalar(select(func.count(Booking.id)).where(Booking.status == "Completed")) or 0
+    completed   = await db.scalar(select(func.count(Booking.id)).where(Booking.status == "Completed")) or 0
+    da_count    = await db.scalar(
+        select(_da_count_expr()).where(
+            Booking.status == "Completed",
+            Booking.da_number.isnot(None),
+            Booking.da_number != '',
+        )
+    ) or 0
 
-    stats = DashboardStats(total_bookings=total, pending=pending, in_progress=in_progress, completed=completed)
+    stats = DashboardStats(total_bookings=total, pending=pending, in_progress=in_progress, completed=completed, da_numbers_count=int(da_count))
     await redis.setex("bts:dashboard:stats", 60, json.dumps(stats.model_dump()))
     return stats

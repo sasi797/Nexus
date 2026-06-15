@@ -399,7 +399,7 @@ async def _poll_inbox_async():
                 print(f"[BTS] Skipping email before cutoff ({sent_at})")
                 continue
 
-            subject = msg.get("subject") or "(No Subject)"
+            subject = msg.get("subject") or ""
             sender_email = msg.get("from", {}).get("emailAddress", {}).get("address", "")
 
             # Skip outbound messages — Graph's /messages endpoint returns all folders
@@ -541,6 +541,11 @@ async def _poll_inbox_async():
                         await redis.publish("bts:events", _json.dumps({"type": "new_message", "booking_id": existing_booking_id, "reopened": reopened}))
 
                     else:
+                        if not msg.get("subject"):
+                            print(f"[BTS] Skipping email with no subject from {sender_email} — no booking created")
+                            _graph_mark_read(client, token, mailbox, graph_msg_id)
+                            continue
+
                         # Priority: Outlook category takes precedence over subject keywords
                         if category_priority:
                             priority = category_priority

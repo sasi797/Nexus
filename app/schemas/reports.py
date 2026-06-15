@@ -64,3 +64,4 @@ class DashboardStats(BaseModel):
     pending: int
     in_progress: int
     completed: int
+    da_numbers_count: int = 0
