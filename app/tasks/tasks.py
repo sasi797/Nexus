@@ -110,26 +110,16 @@ async def _find_existing_booking_id(db, in_reply_to: str, references: str, sende
     Detect whether this email is a reply to an existing booking.
 
     Strategy (in priority order):
-    1. conversationId — same for every message in an Outlook thread (most reliable)
-    2. In-Reply-To / References headers → match against email_messages.message_id
-    3. Subject starts with Re:/Fwd: + sender_email fallback
+    1. In-Reply-To / References headers → explicit reply chain (highest precision)
+    2. conversationId — only when subject has Re:/Fwd: prefix (confirms it's a reply,
+       not a fresh booking request that shares an Outlook conversation thread)
+    3. Subject-based fallback — strip Re:/Fwd:/[EXTERNAL] and match stored subject
     """
     from sqlalchemy import select
     from app.models.email_message import EmailMessage
     from app.models.booking import Booking
 
-    # 1. conversationId-based (catches forwarded threads where In-Reply-To is absent)
-    if conversation_id:
-        result = await db.execute(
-            select(EmailMessage.booking_id)
-            .where(EmailMessage.conversation_id == conversation_id)
-            .limit(1)
-        )
-        booking_id = result.scalar_one_or_none()
-        if booking_id:
-            return booking_id
-
-    # 2. Header-based threading
+    # 1. Header-based threading (most precise — explicit reply chain)
     for header_val in [in_reply_to, references]:
         if not header_val:
             continue
@@ -146,11 +136,24 @@ async def _find_existing_booking_id(db, in_reply_to: str, references: str, sende
             if booking_id:
                 return booking_id
 
+    # 2. conversationId — only when subject has Re:/Fwd: prefix.
+    # A plain (non-reply) email sharing a conversationId is a separate booking request.
+    base_subject = _strip_re_prefix(subject)
+    is_reply_or_forward = base_subject != subject.strip()
+    if conversation_id and is_reply_or_forward:
+        result = await db.execute(
+            select(EmailMessage.booking_id)
+            .where(EmailMessage.conversation_id == conversation_id)
+            .limit(1)
+        )
+        booking_id = result.scalar_one_or_none()
+        if booking_id:
+            return booking_id
+
     # 3. Subject-based fallback — strip Re:/[EXTERNAL]/etc and match by subject only.
     # Do NOT filter by sender_email: replies can come from any participant in the thread.
     # Also try matching bookings that were stored with a Fw: prefix (forwarded emails).
-    base_subject = _strip_re_prefix(subject)
-    if base_subject != subject.strip():
+    if is_reply_or_forward:
         from sqlalchemy import or_
         result = await db.execute(
             select(Booking.id)
