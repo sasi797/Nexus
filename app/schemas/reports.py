@@ -65,3 +65,4 @@ class DashboardStats(BaseModel):
     in_progress: int
     completed: int
     da_numbers_count: int = 0
+    at_risk: int = 0

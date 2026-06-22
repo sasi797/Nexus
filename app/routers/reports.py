@@ -193,7 +193,8 @@ async def hourly_activity(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Bookings created and completed per local hour. Either a specific date or last N days."""
+    """Bookings received per local hour. Completed count is scoped to the same received window
+    so chart totals match the bookings list exactly."""
     from datetime import datetime, timezone
     import zoneinfo
 
@@ -203,31 +204,29 @@ async def hourly_activity(
         except Exception:
             local_tz = zoneinfo.ZoneInfo("UTC")
         day_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=local_tz)
-        day_end = day_start.replace(hour=23, minute=59, second=59)
-        recv_filter = (Booking.received_at >= day_start, Booking.received_at <= day_end)
-        comp_filter = (Booking.completed_at >= day_start, Booking.completed_at <= day_end, Booking.completed_at.is_not(None))
+        day_end = day_start + timedelta(days=1)
+        recv_filter = (Booking.received_at >= day_start, Booking.received_at < day_end)
     else:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         recv_filter = (Booking.received_at >= since,)
-        comp_filter = (Booking.completed_at >= since, Booking.completed_at.is_not(None))
 
     recv_hr = func.extract("hour", func.timezone(tz, Booking.received_at))
-    received_res = await db.execute(
-        select(recv_hr.label("hr"), func.count(Booking.id).label("cnt"))
+
+    # Single query: both received and completed are scoped to the same received_at window.
+    # This ensures chart numbers match the bookings list (no cross-day pollution).
+    result = await db.execute(
+        select(
+            recv_hr.label("hr"),
+            func.count(Booking.id).label("received"),
+            func.count(case((Booking.status == "Completed", 1))).label("completed"),
+        )
         .where(*recv_filter)
         .group_by(recv_hr)
         .order_by(recv_hr)
     )
-    received_map = {int(r.hr): r.cnt for r in received_res.all()}
-
-    comp_hr = func.extract("hour", func.timezone(tz, Booking.completed_at))
-    completed_res = await db.execute(
-        select(comp_hr.label("hr"), func.count(Booking.id).label("cnt"))
-        .where(*comp_filter)
-        .group_by(comp_hr)
-        .order_by(comp_hr)
-    )
-    completed_map = {int(r.hr): r.cnt for r in completed_res.all()}
+    rows = result.all()
+    received_map = {int(r.hr): r.received for r in rows}
+    completed_map = {int(r.hr): r.completed for r in rows}
 
     return [
         HourlyPoint(
