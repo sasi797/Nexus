@@ -64,15 +64,23 @@ async def list_bookings(
     sender_email: str | None = Query(None),
     agent_id: str | None = Query(None),
     search: str | None = Query(None),
-    created_after: str | None = Query(None),  # today | 7d | 30d
-    closed_after: str | None = Query(None),   # today | week | month
+    created_after: str | None = Query(None),  # today | yesterday | 2d | 7d | 30d | date:YYYY-MM-DD
+    closed_after: str | None = Query(None),   # today | week | month | date:YYYY-MM-DD
+    tz: str = Query("UTC"),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    import zoneinfo
     from uuid import UUID
     from sqlalchemy import or_
+
+    try:
+        local_tz = zoneinfo.ZoneInfo(tz)
+    except Exception:
+        local_tz = zoneinfo.ZoneInfo("UTC")
+
     q = select(Booking).options(selectinload(Booking.agent)).order_by(Booking.last_email_at.desc())
 
     if agent_id:
@@ -94,7 +102,7 @@ async def list_bookings(
             Booking.tags.ilike(s),
         ))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(local_tz)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if created_after == 'today':
         q = q.where(Booking.received_at >= today_start)
@@ -111,8 +119,7 @@ async def list_bookings(
         q = q.where(Booking.received_at >= now - timedelta(days=30))
     elif created_after and created_after.startswith('date:'):
         try:
-            d = datetime.strptime(created_after[5:], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_start = datetime.strptime(created_after[5:], '%Y-%m-%d').replace(tzinfo=local_tz)
             day_end = day_start + timedelta(days=1)
             q = q.where(Booking.received_at >= day_start, Booking.received_at < day_end)
         except ValueError:
@@ -127,8 +134,7 @@ async def list_bookings(
         q = q.where(Booking.completed_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
     elif closed_after and closed_after.startswith('date:'):
         try:
-            d = datetime.strptime(closed_after[5:], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_start = datetime.strptime(closed_after[5:], '%Y-%m-%d').replace(tzinfo=local_tz)
             day_end = day_start + timedelta(days=1)
             q = q.where(Booking.completed_at >= day_start, Booking.completed_at < day_end)
         except ValueError:

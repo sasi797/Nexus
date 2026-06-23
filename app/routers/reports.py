@@ -231,7 +231,7 @@ async def hourly_activity(
     return [
         HourlyPoint(
             hour=h,
-            label=f"{h:02d}:00",
+            label=f"{h:02d}:59" if h == 23 else f"{h:02d}:00",
             received=received_map.get(h, 0),
             completed=completed_map.get(h, 0),
         )
