@@ -64,5 +64,6 @@ class DashboardStats(BaseModel):
     pending: int
     in_progress: int
     completed: int
+    ignored: int = 0
     da_numbers_count: int = 0
     at_risk: int = 0
