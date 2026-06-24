@@ -1,4 +1,6 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
+import zoneinfo
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query
@@ -12,6 +14,18 @@ from app.redis_client import get_redis
 from app.schemas.reports import AvgCompletionReport, DailySummaryRow, HourlyPoint, PrioritySlice, ReportStats, StatusBreakdownRow, TrendPoint
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+def _day_range(date_str: Optional[str], tz: str):
+    """Return (day_start, day_end) for a single day in the given tz, or (None, None) for all time."""
+    if not date_str:
+        return None, None
+    try:
+        local_tz = zoneinfo.ZoneInfo(tz)
+    except Exception:
+        local_tz = zoneinfo.ZoneInfo("UTC")
+    day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=local_tz)
+    return day_start, day_start + timedelta(days=1)
 
 PRIORITY_COLORS = {"Very Urgent": "#ef4444", "Urgent": "#f59e0b", "Not Urgent": "#22c55e"}
 
@@ -127,13 +141,16 @@ async def bookings_trend(
 
 @router.get("/priority-distribution", response_model=list[PrioritySlice])
 async def priority_distribution(
+    date: Optional[str] = Query(None),
+    tz: str = Query("UTC"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Booking.priority, func.count(Booking.id).label("cnt"))
-        .group_by(Booking.priority)
-    )
+    day_start, day_end = _day_range(date, tz)
+    q = select(Booking.priority, func.count(Booking.id).label("cnt")).group_by(Booking.priority)
+    if day_start:
+        q = q.where(Booking.received_at >= day_start, Booking.received_at < day_end)
+    result = await db.execute(q)
     rows = result.all()
     total = sum(r.cnt for r in rows) or 1
     return [
@@ -212,21 +229,21 @@ async def hourly_activity(
 
     recv_hr = func.extract("hour", func.timezone(tz, Booking.received_at))
 
-    # Single query: both received and completed are scoped to the same received_at window.
-    # This ensures chart numbers match the bookings list (no cross-day pollution).
     result = await db.execute(
         select(
             recv_hr.label("hr"),
             func.count(Booking.id).label("received"),
             func.count(case((Booking.status == "Completed", 1))).label("completed"),
+            func.count(case((Booking.status.in_(["Pending", "In Progress"]), 1))).label("open"),
         )
         .where(*recv_filter)
         .group_by(recv_hr)
         .order_by(recv_hr)
     )
     rows = result.all()
-    received_map = {int(r.hr): r.received for r in rows}
+    received_map  = {int(r.hr): r.received  for r in rows}
     completed_map = {int(r.hr): r.completed for r in rows}
+    open_map      = {int(r.hr): r.open      for r in rows}
 
     return [
         HourlyPoint(
@@ -234,6 +251,7 @@ async def hourly_activity(
             label=f"{h:02d}:59" if h == 23 else f"{h:02d}:00",
             received=received_map.get(h, 0),
             completed=completed_map.get(h, 0),
+            open=open_map.get(h, 0),
         )
         for h in range(24)
     ]
@@ -241,31 +259,27 @@ async def hourly_activity(
 
 @router.get("/avg-completion", response_model=AvgCompletionReport)
 async def avg_completion_time(
+    date: Optional[str] = Query(None),
+    tz: str = Query("UTC"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """Average time (hours) from booking received to completed, overall and by priority."""
-    epoch_diff = func.extract(
-        "epoch",
-        Booking.completed_at - Booking.received_at,
-    ) / 3600.0
+    day_start, day_end = _day_range(date, tz)
+    epoch_diff = func.extract("epoch", Booking.completed_at - Booking.received_at) / 3600.0
+    base_filter = [Booking.status == "Completed", Booking.completed_at.is_not(None)]
+    if day_start:
+        base_filter += [Booking.received_at >= day_start, Booking.received_at < day_end]
 
     overall_res = await db.execute(
-        select(
-            func.count(Booking.id).label("cnt"),
-            func.avg(epoch_diff).label("avg_h"),
-        )
-        .where(Booking.status == "Completed", Booking.completed_at.is_not(None))
+        select(func.count(Booking.id).label("cnt"), func.avg(epoch_diff).label("avg_h"))
+        .where(*base_filter)
     )
     overall = overall_res.one()
 
     by_priority_res = await db.execute(
-        select(
-            Booking.priority,
-            func.count(Booking.id).label("cnt"),
-            func.avg(epoch_diff).label("avg_h"),
-        )
-        .where(Booking.status == "Completed", Booking.completed_at.is_not(None))
+        select(Booking.priority, func.count(Booking.id).label("cnt"), func.avg(epoch_diff).label("avg_h"))
+        .where(*base_filter)
         .group_by(Booking.priority)
         .order_by(func.avg(epoch_diff))
     )
@@ -276,11 +290,7 @@ async def avg_completion_time(
         overall_avg_hours=round(float(overall.avg_h or 0), 1),
         overall_count=overall.cnt or 0,
         by_priority=[
-            AvgCompletionByPriority(
-                priority=row.priority,
-                avg_hours=round(float(row.avg_h or 0), 1),
-                count=row.cnt,
-            )
+            AvgCompletionByPriority(priority=row.priority, avg_hours=round(float(row.avg_h or 0), 1), count=row.cnt)
             for row in by_priority
         ],
     )
@@ -288,14 +298,17 @@ async def avg_completion_time(
 
 @router.get("/status-breakdown", response_model=list[StatusBreakdownRow])
 async def status_breakdown(
+    date: Optional[str] = Query(None),
+    tz: str = Query("UTC"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """Count of Pending / In Progress / Completed grouped by priority."""
-    result = await db.execute(
-        select(Booking.priority, Booking.status, func.count(Booking.id).label("cnt"))
-        .group_by(Booking.priority, Booking.status)
-    )
+    day_start, day_end = _day_range(date, tz)
+    q = select(Booking.priority, Booking.status, func.count(Booking.id).label("cnt")).group_by(Booking.priority, Booking.status)
+    if day_start:
+        q = q.where(Booking.received_at >= day_start, Booking.received_at < day_end)
+    result = await db.execute(q)
     rows = result.all()
 
     data: dict[str, dict] = {}

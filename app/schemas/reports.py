@@ -38,6 +38,7 @@ class HourlyPoint(BaseModel):
     label: str
     received: int
     completed: int
+    open: int = 0
 
 
 class AvgCompletionByPriority(BaseModel):
