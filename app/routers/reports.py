@@ -307,5 +307,5 @@ async def status_breakdown(
         if key:
             data[row.priority][key] = row.cnt
 
-    priority_order = ["Very Urgent", "Urgent", "Not Urgent"]
+    priority_order = ["Very Urgent", "Urgent", "Not Urgent", "Blank"]
     return [StatusBreakdownRow(**data[p]) for p in priority_order if p in data]

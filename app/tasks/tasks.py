@@ -255,9 +255,17 @@ def _graph_get_attachments(client: httpx.Client, token: str, mailbox: str, msg_i
     inline_cid_map: contentId → base64 data URI, for replacing cid: src in HTML.
     """
     import base64
+    import time
     url = f"{GRAPH_BASE}/users/{mailbox}/messages/{msg_id}/attachments"
-    resp = client.get(url, headers=_graph_headers(token))
-    resp.raise_for_status()
+    for attempt in range(3):
+        resp = client.get(url, headers=_graph_headers(token))
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "10"))
+            print(f"[BTS] Attachments rate-limited (429) — waiting {retry_after}s (attempt {attempt + 1}/3)")
+            time.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        break
     regular: list[dict] = []
     inline_map: dict[str, str] = {}
     for att in resp.json().get("value", []):
@@ -410,6 +418,23 @@ async def _poll_inbox_async():
             if sender_email.lower() == mailbox.lower():
                 continue
             raw_message_id = msg.get("internetMessageId")
+
+            # Dedup check before any additional API calls — already-processed emails
+            # must not trigger an attachment fetch (which causes Graph 429 rate limits).
+            if raw_message_id:
+                async with AsyncSessionLocal() as check_db:
+                    from sqlalchemy import select as sa_select
+                    from app.models.processed_email import ProcessedEmail
+                    exists = await check_db.scalar(
+                        sa_select(ProcessedEmail.message_id)
+                        .where(ProcessedEmail.message_id == raw_message_id)
+                        .limit(1)
+                    )
+                    if exists:
+                        print(f"[BTS] Already processed {raw_message_id[:40]}… — skipping")
+                        _graph_mark_read(client, token, mailbox, graph_msg_id)
+                        continue
+
             to_emails = _parse_graph_addresses(msg.get("toRecipients") or [])
             cc_emails = _parse_graph_addresses(msg.get("ccRecipients") or []) or None
 
@@ -446,21 +471,6 @@ async def _poll_inbox_async():
             conversation_id = msg.get("conversationId")
 
             print(f"[BTS] Processing email from: {sender_email} | Subject: {subject}")
-
-            # Dedup check (read-only — ProcessedEmail insert happens inside the booking transaction)
-            if raw_message_id:
-                async with AsyncSessionLocal() as check_db:
-                    from sqlalchemy import select as sa_select
-                    from app.models.processed_email import ProcessedEmail
-                    exists = await check_db.scalar(
-                        sa_select(ProcessedEmail.message_id)
-                        .where(ProcessedEmail.message_id == raw_message_id)
-                        .limit(1)
-                    )
-                    if exists:
-                        print(f"[BTS] Already processed {raw_message_id[:40]}… — skipping")
-                        _graph_mark_read(client, token, mailbox, graph_msg_id)
-                        continue
 
             email_msg_id = uuid.uuid4()
 
