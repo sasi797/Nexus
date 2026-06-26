@@ -14,7 +14,7 @@ from app.models.agent import Agent
 from app.models.allocation import AllocationLog
 from app.models.booking import Booking, BookingEvent, booking_support_agents_table
 from app.models.booking_read import BookingRead
-from app.models.email_message import EmailMessage
+from app.models.email_message import EmailAttachment, EmailMessage
 from app.models.user import User
 from app.redis_client import get_redis
 from app.schemas.booking import BookingCreate, BookingEventOut, BookingListOut, BookingOut, BookingPageOut, BookingStatusUpdate, BookingUpdate
@@ -170,8 +170,19 @@ async def list_bookings(
     def _has_reply(b: Booking) -> bool:
         return (email_count_map.get(b.id) or 0) > 1
 
+    children_result = await db.execute(
+        select(Booking.parent_booking_id)
+        .where(Booking.parent_booking_id.in_(booking_ids))
+        .distinct()
+    )
+    has_children_ids = {row[0] for row in children_result}
+
     return BookingPageOut(
-        items=[BookingListOut.model_validate(b).model_copy(update={"is_read": _is_read(b), "has_reply": _has_reply(b)}) for b in items],
+        items=[BookingListOut.model_validate(b).model_copy(update={
+            "is_read": _is_read(b),
+            "has_reply": _has_reply(b),
+            "has_children": b.id in has_children_ids,
+        }) for b in items],
         total=total,
         page=page,
         page_size=page_size,
@@ -229,13 +240,67 @@ async def create_booking(
         subject=body.subject,
         priority=body.priority,
         sender_email=body.sender_email,
+        parent_booking_id=body.parent_booking_id,
     )
     db.add(booking)
     db.add(BookingEvent(booking_id=booking_id, event="created", actor_name=current_user.name, new_value="Pending"))
+    if body.parent_booking_id:
+        db.add(BookingEvent(
+            booking_id=booking_id,
+            event="child_booking_created",
+            actor_name=current_user.name,
+            new_value=body.parent_booking_id,
+        ))
+        db.add(BookingEvent(
+            booking_id=body.parent_booking_id,
+            event="child_booking_created",
+            actor_name=current_user.name,
+            new_value=booking_id,
+        ))
+    # Copy source email message + attachments into the child booking so the
+    # triggering email is visible in its thread
+    if body.source_message_id:
+        src_result = await db.execute(
+            select(EmailMessage)
+            .options(selectinload(EmailMessage.attachments))
+            .where(EmailMessage.id == body.source_message_id)
+        )
+        src = src_result.scalar_one_or_none()
+        if src:
+            import uuid as _uuid
+            new_msg = EmailMessage(
+                id=_uuid.uuid4(),
+                booking_id=booking_id,
+                message_id=src.message_id,
+                in_reply_to=src.in_reply_to,
+                conversation_id=src.conversation_id,
+                graph_message_id=src.graph_message_id,
+                direction=src.direction,
+                from_email=src.from_email,
+                to_email=src.to_email,
+                cc_emails=src.cc_emails,
+                subject=src.subject,
+                body_text=src.body_text,
+                body_html=src.body_html,
+                sent_at=src.sent_at,
+            )
+            db.add(new_msg)
+            for att in src.attachments:
+                db.add(EmailAttachment(
+                    id=_uuid.uuid4(),
+                    message_id=new_msg.id,
+                    filename=att.filename,
+                    content_type=att.content_type,
+                    size_bytes=att.size_bytes,
+                    storage_path=att.storage_path,
+                ))
+
     await db.commit()
     await db.refresh(booking)
     await redis.delete(STATS_CACHE_KEY)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
+    if body.parent_booking_id:
+        await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": body.parent_booking_id}))
 
     await _send_notifications(db, [
         notify_roles(db, ['admin', 'supervisor'],
@@ -253,7 +318,14 @@ async def get_booking(
     _: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(Booking).options(selectinload(Booking.agent)).where(Booking.id == booking_id)
+        select(Booking)
+        .options(
+            selectinload(Booking.agent),
+            selectinload(Booking.support_agents),
+            selectinload(Booking.parent_booking),
+            selectinload(Booking.child_bookings),
+        )
+        .where(Booking.id == booking_id)
     )
     booking = result.scalar_one_or_none()
     if booking is None:
@@ -346,6 +418,25 @@ async def update_booking(
     if notify_coros:
         await _send_notifications(db, notify_coros, redis=redis)
 
+    return booking
+
+
+@router.patch("/{booking_id}/account-code", response_model=BookingOut)
+async def set_account_code(
+    booking_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Booking).options(selectinload(Booking.agent), selectinload(Booking.support_agents)).where(Booking.id == booking_id)
+    )
+    booking = result.scalar_one_or_none()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    booking.account_code = body.get("code")
+    await db.commit()
+    await db.refresh(booking)
     return booking
 
 

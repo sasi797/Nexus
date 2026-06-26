@@ -29,6 +29,7 @@ class Booking(Base):
     da_number: Mapped[str | None] = mapped_column(Text)
     da_description: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    account_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -36,8 +37,18 @@ class Booking(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     last_email_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    parent_booking_id: Mapped[str | None] = mapped_column(
+        String(25), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     agent: Mapped["Agent"] = relationship("Agent", back_populates="bookings")  # type: ignore[name-defined]
     support_agents: Mapped[list["Agent"]] = relationship("Agent", secondary=booking_support_agents_table, lazy="selectin")  # type: ignore[name-defined]
+    parent_booking: Mapped["Booking | None"] = relationship(
+        "Booking", remote_side="Booking.id", foreign_keys="[Booking.parent_booking_id]", back_populates="child_bookings"
+    )
+    child_bookings: Mapped[list["Booking"]] = relationship(
+        "Booking", foreign_keys="[Booking.parent_booking_id]", back_populates="parent_booking", lazy="noload"
+    )
     allocation_logs: Mapped[list["AllocationLog"]] = relationship("AllocationLog", back_populates="booking")  # type: ignore[name-defined]
     pending_queue: Mapped["PendingQueue"] = relationship("PendingQueue", back_populates="booking", uselist=False)  # type: ignore[name-defined]
     email_messages: Mapped[list["EmailMessage"]] = relationship("EmailMessage", back_populates="booking", cascade="all, delete-orphan")  # type: ignore[name-defined]

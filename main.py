@@ -12,7 +12,7 @@ MultiPartParser.max_part_size = 25 * 1024 * 1024  # 25 MB
 from app.config import settings
 from app.core.config import settings as core_settings
 from app.redis_client import close_redis, get_redis
-from app.routers import agents, allocations, attendance, auth, booking_config, bookings, dashboard, email_messages, email_templates, events, notifications, pending_queue, reports, roles, shifts
+from app.routers import agents, allocations, attendance, auth, booking_config, bookings, dashboard, email_messages, email_templates, events, notifications, pending_queue, reports, roles, shifts, account_codes
 
 
 async def _email_poll_loop():
@@ -65,6 +65,7 @@ app.include_router(dashboard.router)
 app.include_router(email_messages.router)
 app.include_router(notifications.router)
 app.include_router(events.router)
+app.include_router(account_codes.router)
 
 
 @app.get("/health", tags=["health"])

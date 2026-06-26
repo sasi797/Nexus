@@ -7,6 +7,20 @@ from pydantic import BaseModel, ConfigDict, EmailStr
 Priority = str
 
 
+class ParentBookingBrief(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    subject: str
+
+
+class ChildBookingBrief(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    subject: str
+    status: str
+    da_number: str | None = None
+
+
 class BookingBase(BaseModel):
     subject: str
     priority: Priority = "Blank"
@@ -15,6 +29,8 @@ class BookingBase(BaseModel):
 
 class BookingCreate(BookingBase):
     id: str | None = None
+    parent_booking_id: str | None = None
+    source_message_id: str | None = None
 
 
 class BookingUpdate(BaseModel):
@@ -51,11 +67,15 @@ class BookingOut(BaseModel):
     da_number: str | None
     da_description: str | None
     tags: str | None = None
+    account_code: str | None = None
     received_at: datetime
     assigned_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    parent_booking_id: str | None = None
+    parent_booking: ParentBookingBrief | None = None
+    child_bookings: list[ChildBookingBrief] = []
 
 
 class BookingListOut(BaseModel):
@@ -77,6 +97,8 @@ class BookingListOut(BaseModel):
     last_email_at: datetime
     is_read: bool = True
     has_reply: bool = False
+    parent_booking_id: str | None = None
+    has_children: bool = False
 
 
 class BookingPageOut(BaseModel):
