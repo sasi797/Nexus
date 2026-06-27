@@ -40,6 +40,7 @@ class Booking(Base):
     parent_booking_id: Mapped[str | None] = mapped_column(
         String(25), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     agent: Mapped["Agent"] = relationship("Agent", back_populates="bookings")  # type: ignore[name-defined]
     support_agents: Mapped[list["Agent"]] = relationship("Agent", secondary=booking_support_agents_table, lazy="selectin")  # type: ignore[name-defined]

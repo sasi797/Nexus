@@ -19,6 +19,7 @@ class ChildBookingBrief(BaseModel):
     subject: str
     status: str
     da_number: str | None = None
+    source_message_id: str | None = None
 
 
 class BookingBase(BaseModel):

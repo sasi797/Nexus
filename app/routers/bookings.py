@@ -241,6 +241,7 @@ async def create_booking(
         priority=body.priority,
         sender_email=body.sender_email,
         parent_booking_id=body.parent_booking_id,
+        source_message_id=body.source_message_id,
     )
     db.add(booking)
     db.add(BookingEvent(booking_id=booking_id, event="created", actor_name=current_user.name, new_value="Pending"))
