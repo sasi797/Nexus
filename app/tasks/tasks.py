@@ -196,7 +196,6 @@ async def _save_attachments(db, raw_attachments: list[dict], booking_id: str, em
         ))
 
 
-
 # ------------------------------------------------------------------ #
 #  Graph API helpers                                                   #
 # ------------------------------------------------------------------ #
