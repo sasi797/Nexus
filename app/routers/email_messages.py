@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import html as _html
 import uuid
@@ -45,6 +46,29 @@ def _graph_error_msg(resp) -> str:
     except Exception:
         pass
     return f"Graph API error {resp.status_code}: {resp.text[:150]}"
+
+
+def _is_throttled(resp) -> bool:
+    """Return True if Graph is telling us to back off (rate limit or mailbox concurrency)."""
+    if resp.status_code in (429, 503):
+        return True
+    try:
+        code = resp.json().get("error", {}).get("code", "")
+        return "Concurrency" in code or "RequestLimit" in code or "Throttle" in code
+    except Exception:
+        return False
+
+
+async def _graph_send_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Call a Graph send endpoint with up to 3 attempts on throttle errors."""
+    for attempt in range(3):
+        resp = await getattr(client, method)(url, **kwargs)
+        if not _is_throttled(resp):
+            return resp
+        wait = int(resp.headers.get("Retry-After", "3"))
+        if attempt < 2:
+            await asyncio.sleep(wait)
+    return resp
 
 
 def _to_html(text: str) -> str:
@@ -162,7 +186,8 @@ async def _reply_via_graph(
         if small:
             msg["attachments"] = [_inline_attachment(a) for a in small]
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
+            resp = await _graph_send_with_retry(
+                client, "post",
                 f"{GRAPH_BASE}/users/{mailbox}/messages/{graph_message_id}/reply",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json={"message": msg},
@@ -249,7 +274,8 @@ async def _send_via_graph(
         if small:
             msg["attachments"] = [_inline_attachment(a) for a in small]
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
+            resp = await _graph_send_with_retry(
+                client, "post",
                 f"{GRAPH_BASE}/users/{sender}/sendMail",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json={"message": msg, "saveToSentItems": True},
