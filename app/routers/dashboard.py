@@ -8,7 +8,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
-from app.models.agent import Agent
 from app.models.booking import Booking
 from app.models.user import User
 from app.redis_client import get_redis
@@ -51,37 +50,6 @@ async def dashboard_stats(
     if date:
         day_start, day_end = _day_window(date, tz)
         date_filters = (Booking.received_at >= day_start, Booking.received_at < day_end)
-
-    if current_user.role == "agent":
-        agent_result = await db.execute(select(Agent).where(Agent.user_id == current_user.id))
-        agent = agent_result.scalar_one_or_none()
-        if agent is None:
-            return DashboardStats(total_bookings=0, pending=0, in_progress=0, completed=0, da_numbers_count=0, at_risk=0)
-
-        aid = agent.id
-        total       = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, *date_filters)) or 0
-        pending     = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Pending", *date_filters)) or 0
-        in_progress = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "In Progress", *date_filters)) or 0
-        completed   = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Completed", *date_filters)) or 0
-        ignored     = await db.scalar(select(func.count(Booking.id)).where(Booking.agent_id == aid, Booking.status == "Ignored", *date_filters)) or 0
-        at_risk     = await db.scalar(
-            select(func.count(Booking.id)).where(
-                Booking.agent_id == aid,
-                Booking.status.in_(["Pending", "In Progress"]),
-                Booking.received_at < sla_cutoff,
-                *date_filters,
-            )
-        ) or 0
-        da_count    = await db.scalar(
-            select(_da_count_expr()).where(
-                Booking.agent_id == aid,
-                Booking.status == "Completed",
-                Booking.da_number.isnot(None),
-                Booking.da_number != '',
-                *date_filters,
-            )
-        ) or 0
-        return DashboardStats(total_bookings=total, pending=pending, in_progress=in_progress, completed=completed, ignored=ignored, da_numbers_count=int(da_count), at_risk=at_risk)
 
     # Only use cache for all-time (no date filter)
     if not date:
