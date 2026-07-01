@@ -355,6 +355,18 @@ def poll_email_inbox(self):
         raise self.retry(exc=exc, countdown=10)
 
 
+@celery_app.task(name="app.tasks.tasks.renew_graph_subscription", bind=True, max_retries=3)
+def renew_graph_subscription(self):
+    """Celery task to renew the Graph webhook subscription every 2 days."""
+    async def _renew():
+        from app.services.graph_subscription import renew_subscription
+        await renew_subscription()
+    try:
+        _run(_renew())
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=60)
+
+
 async def _poll_inbox_async():
     import redis.asyncio as aioredis
     from sqlalchemy import select

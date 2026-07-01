@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     S3_BUCKET: str = ""
     S3_PREFIX: str = "BTSEmailAttachments"
 
+    # Microsoft Graph Webhook (change notifications)
+    # Set to your public HTTPS backend URL, e.g. https://api.yourcompany.com
+    WEBHOOK_BASE_URL: str = ""
+    # Random secret string — Graph echoes it back in every notification so we can verify it's genuine
+    GRAPH_WEBHOOK_SECRET: str = "bts-webhook-secret-change-me"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

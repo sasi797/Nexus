@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,27 +10,51 @@ from starlette.formparsers import MultiPartParser
 MultiPartParser.max_part_size = 25 * 1024 * 1024  # 25 MB
 
 from app.config import settings
-from app.core.config import settings as core_settings
 from app.redis_client import close_redis, get_redis
-from app.routers import agents, allocations, attendance, auth, booking_config, bookings, dashboard, email_messages, email_templates, events, notifications, pending_queue, reports, roles, shifts, account_codes
+from app.routers import (
+    agents, allocations, attendance, auth, booking_config, bookings,
+    dashboard, email_messages, email_templates, events, graph_webhook,
+    notifications, pending_queue, reports, roles, shifts, account_codes,
+)
 
 
-async def _email_poll_loop():
-    await asyncio.sleep(15)  # let uvicorn finish binding before first poll
+async def _subscription_renewal_loop():
+    """Renew the Graph webhook subscription every 2 days (subscriptions expire after 3 days)."""
+    await asyncio.sleep(2 * 24 * 3600)
+    while True:
+        try:
+            from app.services.graph_subscription import renew_subscription
+            await renew_subscription()
+        except Exception as e:
+            print(f"[BTS] Subscription renewal error: {e}")
+        await asyncio.sleep(2 * 24 * 3600)
+
+
+async def _sent_items_poll_loop():
+    """Fallback poll every 5 minutes — catches sent items and any missed webhook notifications."""
+    await asyncio.sleep(60)  # Let uvicorn finish binding before first run
     while True:
         try:
             from app.tasks.tasks import _poll_inbox_async
             await _poll_inbox_async()
         except Exception as e:
-            print(f"[BTS] Poll error: {e}")
-        await asyncio.sleep(core_settings.EMAIL_POLL_INTERVAL_SECONDS)
+            print(f"[BTS] Fallback poll error: {e}")
+        await asyncio.sleep(5 * 60)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_redis()
-    poll_task = asyncio.create_task(_email_poll_loop())
+
+    from app.services.graph_subscription import register_subscription
+    await register_subscription()
+
+    renewal_task = asyncio.create_task(_subscription_renewal_loop())
+    poll_task = asyncio.create_task(_sent_items_poll_loop())
+
     yield
+
+    renewal_task.cancel()
     poll_task.cancel()
     await close_redis()
 
@@ -66,6 +90,7 @@ app.include_router(email_messages.router)
 app.include_router(notifications.router)
 app.include_router(events.router)
 app.include_router(account_codes.router)
+app.include_router(graph_webhook.router)
 
 
 @app.get("/health", tags=["health"])
