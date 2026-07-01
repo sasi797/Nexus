@@ -15,9 +15,9 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     beat_schedule={
-        "poll-email-every-30s": {
-            "task": "app.tasks.tasks.poll_email_inbox",
-            "schedule": settings.EMAIL_POLL_INTERVAL_SECONDS,
+        "renew-graph-subscription-every-2d": {
+            "task": "app.tasks.tasks.renew_graph_subscription",
+            "schedule": 2 * 24 * 3600,  # every 2 days
         },
     },
 )
