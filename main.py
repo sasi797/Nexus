@@ -14,7 +14,8 @@ from app.redis_client import close_redis, get_redis
 from app.routers import (
     agents, allocations, attendance, auth, booking_config, bookings,
     dashboard, email_messages, email_templates, events, graph_webhook,
-    notifications, pending_queue, reports, roles, shifts, account_codes,
+    history, notifications, pending_queue, reports, roles, shifts, account_codes,
+    upload,
 )
 
 
@@ -91,6 +92,8 @@ app.include_router(notifications.router)
 app.include_router(events.router)
 app.include_router(account_codes.router)
 app.include_router(graph_webhook.router)
+app.include_router(upload.router)
+app.include_router(history.router)
 
 
 @app.get("/health", tags=["health"])
