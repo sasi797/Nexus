@@ -297,7 +297,6 @@ async def create_booking(
                 ))
 
     await db.commit()
-    await db.refresh(booking)
     await redis.delete(STATS_CACHE_KEY)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
     if body.parent_booking_id:
@@ -309,6 +308,9 @@ async def create_booking(
             f"Booking {booking_id} — {body.subject}",
             "booking_created", booking_id),
     ], redis=redis)
+    # Refresh last, right before the response is built — avoids reopening a
+    # transaction that then sits idle across the redis calls/notifications above.
+    await db.refresh(booking)
     return booking
 
 
@@ -412,8 +414,10 @@ async def update_booking(
 
     await db.commit()
     await db.refresh(booking)
-    await redis.delete(STATS_CACHE_KEY)
+    # _mark_read (which commits) must run before any redis call, so the
+    # transaction refresh() reopened above doesn't sit idle across redis I/O.
     await _mark_read(db, current_user.id, booking_id, booking.updated_at)
+    await redis.delete(STATS_CACHE_KEY)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     if notify_coros:
@@ -470,8 +474,10 @@ async def update_status(
     db.add(BookingEvent(booking_id=booking_id, event="status_changed", actor_name=current_user.name, old_value=prev_status, new_value=body.status))
     await db.commit()
     await db.refresh(booking)
-    await redis.delete(STATS_CACHE_KEY)
+    # _mark_read (which commits) must run before any redis call, so the
+    # transaction refresh() reopened above doesn't sit idle across redis I/O.
     await _mark_read(db, current_user.id, booking_id, booking.updated_at)
+    await redis.delete(STATS_CACHE_KEY)
     await redis.publish("bts:events", json.dumps({"type": "booking_event", "booking_id": booking_id}))
 
     notify_coros = []

@@ -370,6 +370,11 @@ async def reply_to_booking(
         )
         thread_anchor = fallback_result.scalar_one_or_none()
 
+    # Close the read transaction now — everything below is either pure Python
+    # or slow external I/O (S3 upload, Graph API send with retries), and must
+    # not hold a pooled DB connection idle for that duration.
+    await db.commit()
+
     reply_subject = booking.subject
     if not reply_subject.lower().startswith("re:"):
         reply_subject = f"Re: {reply_subject}"
@@ -511,6 +516,11 @@ async def sync_booking_emails(
     conversation_id = conv_result.scalar_one_or_none()
     if not conversation_id:
         return {"synced": 0}
+
+    # Close the read transaction before the (potentially unbounded, multi-page)
+    # Graph API fetch below — that connection must not sit idle-in-transaction
+    # for the duration of the sync.
+    await db.commit()
 
     token = get_graph_token(core_settings)
     auth_hdr = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -682,9 +692,13 @@ async def sync_booking_emails(
                     .on_conflict_do_nothing()
                 )
 
+            # Commit per message rather than once at the end — bounds each
+            # transaction to a single message's DB work instead of holding a
+            # connection open across the whole sync (including this message's
+            # own Graph attachment fetch above).
+            await db.commit()
             synced += 1
 
-    await db.commit()
     return {"synced": synced}
 
 
