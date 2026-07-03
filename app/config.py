@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     s3_bucket: str = ""
     s3_prefix: str = "BTSEmailAttachments"
 
+    # Anthropic / PDF extraction
+    anthropic_api_key: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]
