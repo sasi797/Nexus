@@ -2,12 +2,13 @@
 Microsoft Graph change notification webhook endpoint.
 
 Graph POSTs here whenever a new email arrives in the inbox, replacing the
-30-second polling loop. Each notification triggers one _poll_inbox_async()
-call which uses the existing dedup table to avoid reprocessing.
+30-second polling loop. Each notification enqueues the existing
+poll_email_inbox Celery task, which runs in the worker container (not this
+API process) and uses the existing dedup table to avoid reprocessing.
 """
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from app.core.config import settings
 
@@ -17,7 +18,6 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 @router.post("/graph")
 async def graph_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
     validationToken: Optional[str] = Query(None),
 ):
     # Validation handshake — Graph sends a POST with this query param when the
@@ -35,17 +35,13 @@ async def graph_webhook(
         if notification.get("clientState") != settings.GRAPH_WEBHOOK_SECRET:
             continue
         if notification.get("changeType") == "created":
-            background_tasks.add_task(_handle_new_mail)
+            # Enqueue on the Celery worker — poll_email_inbox makes synchronous
+            # Graph API calls and must never run inline on the API's event
+            # loop, or it blocks every other request (including health
+            # checks) for the duration of each Graph call.
+            from app.tasks.tasks import poll_email_inbox
+            poll_email_inbox.delay()
             break  # One poll covers all notifications in this batch
 
     # Graph requires 202 — any other status triggers an automatic retry storm.
     return Response(status_code=202)
-
-
-async def _handle_new_mail() -> None:
-    """Trigger a full inbox poll when Graph notifies of a new message."""
-    try:
-        from app.tasks.tasks import _poll_inbox_async
-        await _poll_inbox_async()
-    except Exception as e:
-        print(f"[BTS] Webhook-triggered poll error: {e}")
