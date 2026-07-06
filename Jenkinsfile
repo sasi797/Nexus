@@ -1,5 +1,11 @@
 pipeline {
     agent any
+    options {
+        disableConcurrentBuilds()
+    }
+    environment {
+        COMPOSE_PROJECT_NAME = 'nexus-backend'
+    }
     stages {
         stage('Checkout') {
             steps { checkout scm }
@@ -9,9 +15,9 @@ pipeline {
         }
         stage('Deploy') {
             steps {
-                sh 'docker compose down || true'
+                sh 'docker compose down --remove-orphans || true'
                 sh 'docker compose build'
-                sh 'docker compose up -d'
+                sh 'docker compose up -d --remove-orphans'
             }
         }
         stage('Health Check') {
